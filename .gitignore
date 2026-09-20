@@ -1,0 +1,24 @@
+# secrets
+server/.env
+
+# deps / build
+server/vendor/
+server/node_modules/
+server/public/storage
+server/public/build/
+server/bootstrap/cache/*.php
+server/storage/logs/*
+server/storage/framework/cache/data/*
+server/storage/framework/sessions/*
+server/storage/framework/views/*
+server/storage/app/public/*
+
+# cli local
+cli/.hub/
+cli/export*/
+cli/_testdb/
+
+# archives / temp
+*.tar.gz
+*.zip
+_commitmsg*.txt

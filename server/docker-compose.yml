@@ -1,0 +1,51 @@
+# 云端中台 · docker-compose（ECS 部署可选方案）
+# 注意：DB 默认指向"外部 MySQL 5.7"（如你宝塔里已有的实例）；如要自带 DB，解开 mysql 服务并改 DB_HOST=mysql。
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./storage:/var/www/html/storage
+    depends_on:
+      - redis
+
+  web:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./public:/var/www/html/public:ro
+      - ./docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - app
+
+  horizon:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    command: php artisan horizon
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+
+  # 自带 MySQL（可选；生产建议用你宝塔里的 5.7 实例，则不用解这段）
+  # mysql:
+  #   image: mysql:5.7
+  #   restart: unless-stopped
+  #   environment:
+  #     MYSQL_DATABASE: listing-hub
+  #     MYSQL_USER: listing-hub
+  #     MYSQL_PASSWORD: change-me
+  #     MYSQL_ROOT_PASSWORD: change-me-root
+  #   command: --default-storage-engine=InnoDB --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+  #   volumes:
+  #     - mysql-data:/var/lib/mysql
+
+# volumes:
+#   mysql-data:
