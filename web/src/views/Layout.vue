@@ -7,6 +7,7 @@
         <el-menu-item index="/listings">上架</el-menu-item>
         <el-menu-item index="/products">商品</el-menu-item>
         <el-menu-item index="/designs">设计</el-menu-item>
+        <el-menu-item index="/users">用户</el-menu-item>
       </el-menu>
       <div class="right">
         <span class="muted">{{ email }}</span>

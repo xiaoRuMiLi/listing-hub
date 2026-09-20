@@ -38,7 +38,7 @@ class ProductController extends Controller
 
     public function show($id)
     {
-        $p = Product::with(['sources.supplier', 'categories', 'variants.shipping', 'designs'])->findOrFail($id);
+        $p = Product::with(['sources.supplier', 'categories', 'variants.shipping', 'designs', 'shipping'])->findOrFail($id);
 
         return ['ok' => true, 'data' => $p];
     }

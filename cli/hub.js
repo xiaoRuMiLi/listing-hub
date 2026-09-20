@@ -96,6 +96,7 @@ async function cmdImport(dir) {
   const products = [];
   const designs = [];
   const listings = [];
+  const shipping = [];
 
   const pRows = readCsv(dir, 'products.csv') || [];
   for (const p of pRows) {
@@ -109,6 +110,12 @@ async function cmdImport(dir) {
       detail_json: { factory: p.factory || '', technology: p.technology || '', variant_code: p.variant_code || '', variants_count: p.variants_count || '' },
       sources: [{ supplier_code: 'hicustom', external_id: String(p.id), supplier_sku: p.spu_code || '', is_primary: true }],
     });
+    for (const [col, cc] of [['US', 'US'], ['UK', 'GB'], ['CA', 'CA'], ['DE', 'DE'], ['MX', 'MX'], ['FR', 'FR'], ['ES', 'ES'], ['IT', 'IT']]) {
+      const amt = p['shipping_' + col];
+      if (amt != null && String(amt).trim() !== '') {
+        shipping.push({ product_code: String(p.id), country: cc, amount: num(amt), channel: p['shipping_channel_' + col] || null });
+      }
+    }
   }
 
   const dRows = readCsv(dir, 'designs.csv') || [];
@@ -120,6 +127,7 @@ async function cmdImport(dir) {
       source: d.source || 'import', cn_name: d.cn_name || null, en_name: d.en_name || null,
       pattern: d.design_pattern || null, template: d.design_template || null,
       gallery_codes: d.gallery_codes || null, effect_count: num(d.effect_image_count),
+      main_image: d.main_image || null, other_images: d.other_images || null,
       status: d.status || 'active',
     });
   }
@@ -149,8 +157,8 @@ async function cmdImport(dir) {
     });
   }
 
-  console.log(`读取: products=${products.length} designs=${designs.length} listings=${listings.length}（来自 ${dir}）`);
-  const payload = { machine_id: 'local-ws', products, designs, listings };
+  console.log(`读取: products=${products.length} shipping=${shipping.length} designs=${designs.length} listings=${listings.length}（来自 ${dir}）`);
+  const payload = { machine_id: 'local-ws', products, product_shipping: shipping, designs, listings };
   const r = await request('POST', API + '/sync/push', payload, token);
   if (r.status !== 200 || !r.json || !r.json.ok) { console.error('推送失败:', r.status, r.raw.slice(0, 400)); process.exit(1); }
   console.log('✅ 推送完成:');

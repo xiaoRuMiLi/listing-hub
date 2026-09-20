@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Domain\Catalog\Models\Product;
+use App\Domain\Catalog\Models\ProductShipping;
 use App\Domain\Catalog\Models\ProductSupplier;
 use App\Domain\Catalog\Models\Supplier;
 use App\Domain\Design\Models\Design;
@@ -28,7 +29,7 @@ class SyncController extends Controller
             'status' => 'running', 'started_at' => now(),
         ]);
 
-        $stats = ['products' => $this->counts(), 'designs' => $this->counts(), 'listings' => $this->counts()];
+        $stats = ['products' => $this->counts(), 'designs' => $this->counts(), 'listings' => $this->counts(), 'product_shipping' => $this->counts()];
         $conflicts = [];
 
         DB::transaction(function () use ($payload, &$stats, &$conflicts) {
@@ -82,6 +83,8 @@ class SyncController extends Controller
                     'template' => $d['template'] ?? null,
                     'gallery_codes' => $d['gallery_codes'] ?? null,
                     'effect_count' => $d['effect_count'] ?? null,
+                    'main_image' => $d['main_image'] ?? null,
+                    'other_images' => $d['other_images'] ?? null,
                     'status' => $this->safeEnum($d['status'] ?? null, ['draft', 'active', 'superseded', 'archived'], 'active'),
                 ];
                 if ($prod === null) { unset($row['product_id']); }
@@ -89,6 +92,18 @@ class SyncController extends Controller
                 if ($existing) { $existing->update($row); $stats['designs']['updated']++; }
                 elseif ($prod !== null) { Design::create($row); $stats['designs']['created']++; }
                 else { $stats['designs']['skipped']++; }
+            }
+
+            // ②b 商品物流（商品级·各国）
+            foreach (($payload['product_shipping'] ?? []) as $s) {
+                $prod = Product::where('code', (string) ($s['product_code'] ?? ''))->first();
+                $country = strtoupper((string) ($s['country'] ?? ''));
+                if ($prod === null || $country === '') { continue; }
+                ProductShipping::updateOrCreate(
+                    ['product_id' => $prod->id, 'country' => $country],
+                    ['amount' => $s['amount'] ?? null, 'currency' => $s['currency'] ?? null, 'channel' => $s['channel'] ?? null, 'updated_at' => now()],
+                );
+                $stats['product_shipping']['updated']++;
             }
 
             // ③ 上架

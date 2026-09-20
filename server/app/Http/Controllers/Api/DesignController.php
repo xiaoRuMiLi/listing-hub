@@ -75,4 +75,33 @@ class DesignController extends Controller
 
         return ['ok' => true];
     }
+
+    /** ★ 设计效果图归一：main_image / other_images → 镜像 OSS → 改写为自有 URL */
+    public function normalizeImages(Request $r, $id)
+    {
+        $d = Design::findOrFail($id);
+        $media = app(\App\Domain\Asset\Services\MediaService::class);
+        $allowed = (array) config('media.allowed_hosts', []);
+        $changed = [];
+        $mirror = function (string $url, string $role) use ($media, $allowed, $d, &$changed) {
+            if ($url === '') { return ''; }
+            $host = parse_url($url, PHP_URL_HOST) ?: '';
+            if ($host && in_array($host, $allowed, true)) { return $url; }
+            try {
+                $res = $media->mirror($url);
+                $media->attach(['owner_type' => 'design', 'owner_id' => $d->id, 'role' => $role, 'blob_id' => $res['blob']->id]);
+                $changed[$role] = ($changed[$role] ?? 0) + 1;
+
+                return $res['blob']->public_url;
+            } catch (\Throwable $e) {
+                return $url;
+            }
+        };
+        if ($d->main_image) { $d->main_image = $mirror($d->main_image, 'main'); }
+        $others = array_filter(array_map('trim', explode('|', (string) $d->other_images)));
+        if ($others) { $d->other_images = implode('|', array_map(fn ($u, $i) => $mirror($u, 'other_' . ($i + 1)), $others, array_keys($others))); }
+        $d->save();
+
+        return ['ok' => true, 'data' => ['design_code' => $d->design_code, 'mirrored' => $changed]];
+    }
 }

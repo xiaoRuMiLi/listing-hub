@@ -43,4 +43,10 @@ export const Api = {
   updateListing: (id, patch) => http.patch('/listings/' + id, patch),
   updateProduct: (id, patch) => http.patch('/products/' + id, patch),
   revisions: (id) => http.get('/listings/' + id + '/revisions'),
+  normalizeListing: (id) => http.post('/listings/' + id + '/normalize-images'),
+  normalizeDesign: (id) => http.post('/designs/' + id + '/normalize-images'),
+
+  users: () => http.get('/users'),
+  createUser: (p) => http.post('/users', p),
+  deleteUser: (id) => http.delete('/users/' + id),
 };

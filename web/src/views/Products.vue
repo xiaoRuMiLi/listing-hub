@@ -51,6 +51,23 @@
           <el-table-column prop="size" label="尺码" />
           <el-table-column prop="weight_g" label="重量g" />
         </el-table>
+
+        <h4>物流（各国试算）</h4>
+        <el-table :data="cur.shipping || []" size="small" border>
+          <el-table-column prop="country" label="国家" width="90" />
+          <el-table-column label="运费"><template #default="{ row }">{{ row.amount }} {{ row.currency || '' }}</template></el-table-column>
+          <el-table-column prop="channel" label="渠道" />
+        </el-table>
+        <div v-if="!(cur.shipping && cur.shipping.length)" class="muted">暂无物流数据（可跑本仓 shipping:backfill 后重新 import）</div>
+
+        <h4>设计 / 效果图</h4>
+        <div class="gallery">
+          <div v-for="d in (cur.designs || [])" :key="d.id" class="dcard">
+            <a v-if="d.main_image" :href="d.main_image" target="_blank" rel="noopener"><img :src="d.main_image" class="shot" /></a>
+            <div class="mono">{{ d.design_code }} <span class="muted">{{ d.design_key || '' }}</span></div>
+          </div>
+        </div>
+        <div v-if="!(cur.designs && cur.designs.length)" class="muted">该商品暂无设计</div>
       </template>
     </el-drawer>
   </div>
@@ -78,3 +95,9 @@ function reload() { f.value.page = 1; load(); }
 async function open(row) { const { data } = await Api.product(row.id); cur.value = data.data; drawer.value = true; }
 onMounted(load);
 </script>
+
+<style scoped>
+.gallery { display: flex; flex-wrap: wrap; gap: 10px; }
+.gallery .shot { width: 120px; height: 120px; object-fit: contain; background: #fafafa; border: 1px solid #eee; border-radius: 8px; display:block; }
+.dcard { text-align: center; }
+</style>

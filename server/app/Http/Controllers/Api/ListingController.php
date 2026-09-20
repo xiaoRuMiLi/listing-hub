@@ -142,6 +142,37 @@ class ListingController extends Controller
         return ['ok' => true, 'data' => $l->children()->get()];
     }
 
+    /** ★ 图片 URL 归一：把 attrs_json 里的指纹图片字段 → 镜像 OSS → 改写为自有 URL */
+    public function normalizeImages(Request $r, $id)
+    {
+        $l = Listing::findOrFail($id);
+        $attrs = $l->attrs_json ?? [];
+        $media = app(\App\Domain\Asset\Services\MediaService::class);
+        $allowed = (array) config('media.allowed_hosts', []);
+
+        $map = ['main_product_image_locator' => 'main'];
+        for ($i = 1; $i <= 8; $i++) { $map['other_product_image_locator_' . $i] = 'other_' . $i; }
+
+        $changed = [];
+        foreach ($map as $key => $role) {
+            $val = $attrs[$key] ?? null;
+            if (! is_string($val) || $val === '') { continue; }
+            $host = parse_url($val, PHP_URL_HOST) ?: '';
+            if ($host && in_array($host, $allowed, true)) { continue; }   // 已是我们域名 → 跳过（幂等）
+            try {
+                $res = $media->mirror($val);
+                $attrs[$key] = $res['blob']->public_url;
+                $media->attach(['owner_type' => 'listing', 'owner_id' => $l->id, 'role' => $role, 'blob_id' => $res['blob']->id]);
+                $changed[$key] = $res['blob']->public_url;
+            } catch (\Throwable $e) {
+                $changed[$key] = 'ERR: ' . $e->getMessage();
+            }
+        }
+        if ($changed) { $l->attrs_json = $attrs; $l->save(); }
+
+        return ['ok' => true, 'data' => ['id' => $l->id, 'sku' => $l->sku, 'changed' => $changed]];
+    }
+
     public function revisions($id)
     {
         return ['ok' => true, 'data' => ListingRevision::where('listing_id', $id)->orderByDesc('revision')->get()];

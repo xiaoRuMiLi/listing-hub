@@ -35,6 +35,12 @@ class Product extends Model
         return $this->hasMany(ProductVariant::class);
     }
 
+    /** 商品级物流（各国运费/渠道） */
+    public function shipping()
+    {
+        return $this->hasMany(ProductShipping::class, 'product_id');
+    }
+
     public function designs()
     {
         return $this->hasMany(Design::class);

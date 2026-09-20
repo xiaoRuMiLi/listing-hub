@@ -5,6 +5,7 @@ import Dashboard from './views/Dashboard.vue';
 import Listings from './views/Listings.vue';
 import Products from './views/Products.vue';
 import Designs from './views/Designs.vue';
+import Users from './views/Users.vue';
 
 const routes = [
   { path: '/login', component: Login },
@@ -16,6 +17,7 @@ const routes = [
       { path: 'listings', component: Listings, meta: { title: '上架(路标)' } },
       { path: 'products', component: Products, meta: { title: '商品' } },
       { path: 'designs', component: Designs, meta: { title: '设计' } },
+      { path: 'users', component: Users, meta: { title: '用户' } },
     ],
   },
 ];
