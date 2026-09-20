@@ -193,3 +193,26 @@ curl -s -X POST https://hub.weixiubang.club/api/v1/auth/login \
 5. **伪静态**：必须是 Laravel 规则，否则 404。
 6. **运行目录 = public**：否则静态资源/入口不对。
 7. **权限**：`storage`、`bootstrap/cache` 必须 `www` 可写。
+
+---
+
+## 11. Vue 管理端（`/admin/`）
+
+管理端的**构建产物**在 `web/dist/`（Vue3 + Vite + Element Plus），已在构建时放进 `server/public/admin/`。
+
+**部署**（补丁 `hub-patch-web.tar.gz`，含 `public/admin/**`）：
+1. 宝塔 → 文件 → `/www/wwwroot/cbc.weixiubang.club/` → 上传 → 解压（覆盖）
+2. 访问 **`https://cbc.weixiubang.club/admin/`** → 用中台账号登录
+3. （无需 nginx 改配置：用的是 hash 路由；API 走同域 `/api/v1`）
+
+**本地开发**：
+```bash
+cd web
+npm install
+npm run build        # 产物 → dist/（拷到 server/public/admin 即可）
+npm run dev          # 开发服务器（vite.config 已代理 /api → 中台）
+```
+**改 API 地址**：构建时设 `VITE_API_BASE`（默认 `https://cbc.weixiubang.club/api/v1`）。
+
+> 说明：管理端**只做增删改查/查看**（上架仍在本地下发）；登录用中台账号（同 `hub` CLI）。
+

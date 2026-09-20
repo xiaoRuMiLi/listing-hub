@@ -18,6 +18,10 @@ cli/.hub/
 cli/export*/
 cli/_testdb/
 
+# web
+web/node_modules/
+web/dist/
+
 # archives / temp
 *.tar.gz
 *.zip
