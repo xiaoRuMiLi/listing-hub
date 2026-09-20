@@ -207,12 +207,17 @@ class ListingController extends Controller
         foreach ($urls as $i => $u) {
             $role = $i === 0 ? 'main' : ('other_' . $i);
             $host = parse_url($u, PHP_URL_HOST) ?: '';
-            $already = $host && in_array($host, $allowed, true);
+            // 已是自有域名 → 跳过（不重复镜像）
+            if ($host && in_array($host, $allowed, true)) {
+                $ossUrls[] = $u;
+                $results[] = ['role' => $role, 'from' => $u, 'to' => $u, 'status' => 'already'];
+                continue;
+            }
             try {
                 $res = $media->mirror($u);
                 $media->attach(['owner_type' => 'listing', 'owner_id' => $l->id, 'role' => $role, 'blob_id' => $res['blob']->id]);
                 $ossUrls[] = $res['blob']->public_url;
-                $results[] = ['role' => $role, 'from' => $u, 'to' => $res['blob']->public_url, 'status' => $already ? 'already' : 'ok', 'deduped' => $res['deduped']];
+                $results[] = ['role' => $role, 'from' => $u, 'to' => $res['blob']->public_url, 'status' => 'ok', 'deduped' => $res['deduped']];
             } catch (\Throwable $e) {
                 $ossUrls[] = $u;
                 $results[] = ['role' => $role, 'from' => $u, 'to' => null, 'status' => 'error', 'error' => $e->getMessage()];

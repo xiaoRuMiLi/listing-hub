@@ -157,7 +157,9 @@ const listImgs = computed(() => {
   return out;
 });
 
+const isOss = (u) => /oss-cn-hongkong|listing-hub\.oss/.test(String(u || ''));
 async function switchCdnOne(row) {
+  if (isOss(row.main_image)) { ElMessage.info('已是 OSS，跳过：' + row.sku); return; }
   try { const { data } = await Api.switchCdn(row.id); ElMessage.success('换床 ' + row.sku + '：' + data.data.count + ' 张'); load(); }
   catch (e) { ElMessage.error('换床失败：' + row.sku); }
 }
@@ -177,8 +179,9 @@ async function switchCdnCur() {
   finally { cdnCur.value = false; }
 }
 async function switchCdnAll() {
-  const list = rows.value.slice();
-  if (!list.length) return;
+  const list = rows.value.filter((r) => r.main_image && !isOss(r.main_image));
+  const skipped = rows.value.length - list.length;
+  if (!list.length) { ElMessage.info('本页都已换过（或没图），无需处理' + (skipped ? '（已跳过 ' + skipped + '）' : '')); return; }
   cdnProgress.value = { done: 0, total: list.length }; cdnBatch.value = true;
   let ok = 0;
   for (const r of list) {
@@ -186,7 +189,7 @@ async function switchCdnAll() {
     cdnProgress.value.done++;
   }
   cdnBatch.value = false;
-  ElMessage.success('批量换床完成：' + ok + '/' + list.length);
+  ElMessage.success('批量换床完成：' + ok + '/' + list.length + (skipped ? ('（跳过已是OSS ' + skipped + '）') : ''));
   load();
 }
 const prettyAttrs = computed(() => (cur.value && cur.value.attrs_json) ? JSON.stringify(cur.value.attrs_json, null, 2) : '(空)');
