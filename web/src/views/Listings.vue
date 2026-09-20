@@ -69,6 +69,14 @@
         <el-button type="primary" :loading="saving" @click="save">保存</el-button>
         <span class="muted" style="margin-left:8px">带 revision 乐观锁（冲突会提示）</span>
 
+        <h4 style="margin-top:16px">上架图片（{{ assets.length }}）</h4>
+        <div class="gallery">
+          <a v-for="a in assets" :key="a.id" :href="(a.blob && a.blob.public_url) || '#'" target="_blank" rel="noopener" :title="a.role">
+            <img :src="(a.blob && a.blob.public_url) || ''" class="shot" />
+          </a>
+        </div>
+        <div v-if="!assets.length" class="muted">暂无已推图片（重跑 hub import 时会把该 listing 的效果图一起推上来）</div>
+
         <h4 style="margin-top:16px">attrs_json（上架字段）</h4>
         <pre class="mono">{{ prettyAttrs }}</pre>
       </template>
@@ -111,11 +119,13 @@ async function load() {
 function reload() { f.value.page = 1; load(); }
 function reset() { f.value = { marketplace: '', status: '', is_parent: '', sku: '', page: 1, per_page: 50 }; load(); }
 
-function open(row) {
-  cur.value = row;
-  edit.value = { status: row.status, price: row.price, product_price: row.product_price, shipping_fee: row.shipping_fee };
+async function open(row) {
+  const { data } = await Api.listing(row.id, { with_assets: 1 });
+  cur.value = data.data;
+  edit.value = { status: cur.value.status, price: cur.value.price, product_price: cur.value.product_price, shipping_fee: cur.value.shipping_fee };
   drawer.value = true;
 }
+const assets = computed(() => (cur.value && cur.value.assets) || []);
 const prettyAttrs = computed(() => (cur.value && cur.value.attrs_json) ? JSON.stringify(cur.value.attrs_json, null, 2) : '(空)');
 
 async function save() {
@@ -136,4 +146,6 @@ onMounted(load);
 
 <style scoped>
 pre.mono { background:#0f172a; color:#cbd5e1; padding:10px; border-radius:8px; max-height:280px; overflow:auto; white-space:pre-wrap; }
+.gallery { display:flex; flex-wrap:wrap; gap:8px; }
+.gallery .shot { width:96px; height:96px; object-fit:cover; border:1px solid #eee; border-radius:8px; display:block; background:#fafafa; }
 </style>

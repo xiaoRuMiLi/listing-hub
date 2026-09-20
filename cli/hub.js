@@ -154,6 +154,7 @@ async function cmdImport(dir) {
       variation_theme: v.variation_theme || null, variant_color: v.variant_color || null, variant_size: v.variant_size || null,
       design_code: v.design_code || null, status: v.status || 'planned',
       price: num(v.price), product_price: num(v.product_price), shipping_fee: num(v.shipping_fee), quantity: num(v.quantity),
+      images: [v.main_image, ...String(v.other_images || '').split('|')].map((s) => String(s || '').trim()).filter(Boolean),
     });
   }
 
@@ -161,8 +162,72 @@ async function cmdImport(dir) {
   const payload = { machine_id: 'local-ws', products, product_shipping: shipping, designs, listings };
   const r = await request('POST', API + '/sync/push', payload, token);
   if (r.status !== 200 || !r.json || !r.json.ok) { console.error('推送失败:', r.status, r.raw.slice(0, 400)); process.exit(1); }
-  console.log('✅ 推送完成:');
+  console.log('✅ 数据推送完成:');
   console.log(JSON.stringify(r.json.data, null, 2));
+
+  // ★ 推图（分批：每次 3 个 listing → 避免一次请求镜像过多图导致网关超时/502）
+  console.log('🖼 推送效果图到 OSS（分批）…');
+  let guard = 0;
+  for (;;) {
+    const ir = await request('POST', API + '/listings/oss-images', { limit: 3 }, token);
+    if (!ir.json || !ir.json.ok) { console.error('  推图失败:', ir.status, (ir.raw || '').slice(0, 150)); break; }
+    const p = ir.json.data;
+    console.log('  本批 ' + p.processed.length + ' 个，剩余 ' + p.remaining);
+    if (p.remaining <= 0 || p.processed.length === 0 || ++guard > 500) break;
+  }
+  console.log('✅ 效果图推送完成（已镜像进 OSS）');
+}
+
+// 换图床：把本地 designs.csv / listing_variants.csv 里的图片镜像到 OSS，并就地改写为 OSS URL
+async function cmdOssify(dir) {
+  const token = loadToken();
+  if (!token) { console.error('未登录，先 node hub.js login <email> <password>'); process.exit(1); }
+  dir = dir || (__dirname.includes(path.sep + 'cli') ? path.join(__dirname, '..', '..', 'skills', 'hicustom-api', 'database') : path.join(__dirname, '..', 'database'));
+  const cache = new Map();
+  const OSS_RE = /listing-hub\.oss-cn-hongkong\.aliyuncs\.com/;
+  async function oss(u) {
+    u = String(u || '').trim();
+    if (!u || !/^https?:\/\//i.test(u) || OSS_RE.test(u)) return u;
+    if (cache.has(u)) return cache.get(u);
+    let out = u;
+    try {
+      const r = await fetch(API + '/assets/mirror', { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify({ url: u }) });
+      const j = await r.json();
+      if (j && j.ok && j.data && j.data.public_url) out = j.data.public_url;
+    } catch (e) { /* 保留原值 */ }
+    cache.set(u, out);
+    return out;
+  }
+  const specs = [
+    { file: 'designs.csv', fields: ['main_image', 'other_images'] },
+    { file: 'listing_variants.csv', fields: ['main_image', 'other_images'] },
+  ];
+  console.log('换图床 → OSS（目录 ' + dir + '）');
+  for (const spec of specs) {
+    const p = path.join(dir, spec.file);
+    if (!fs.existsSync(p)) { console.log('  (缺) ' + spec.file); continue; }
+    const text = fs.readFileSync(p, 'utf8');
+    const header = headerOf(text);
+    const rows = parseCsv(text);
+    let changed = 0;
+    for (const row of rows) {
+      for (const f of spec.fields) {
+        const v = row[f];
+        if (!v) continue;
+        const parts = String(v).split('|').map((s) => s.trim()).filter(Boolean);
+        const outs = [];
+        for (const u of parts) outs.push(await oss(u));
+        const joined = outs.join('|');
+        if (joined !== String(v)) { row[f] = joined; changed++; }
+      }
+    }
+    if (changed) {
+      backup(dir, spec.file, text);
+      fs.writeFileSync(p, '\uFEFF' + stringifyCsv(header, rows).replace(/^\uFEFF/, ''));
+    }
+    console.log('  ' + spec.file + ': 改写 ' + changed + ' 处（备份在 _hub-backup/）');
+  }
+  console.log('✅ 完成：本地已切到 OSS 图床');
 }
 
 async function cmdPush(file) {
@@ -265,6 +330,7 @@ function backup(dir, file, text) {
     if (cmd === 'push') return await cmdPush(a1);
     if (cmd === 'pull') return await cmdPull(a1);
     if (cmd === 'pullcsv') return await cmdPullCsv(a1, a2);
+    if (cmd === 'ossify') return await cmdOssify(a1);
     console.log('用法: node hub.js <login|import|push|pull> ...');
   } catch (e) { console.error('ERR', e.message); process.exit(1); }
 })();

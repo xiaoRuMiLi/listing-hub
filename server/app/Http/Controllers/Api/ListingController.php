@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Domain\Design\Models\Design;
 use App\Domain\Identity\Models\Account;
 use App\Domain\Listing\Models\Listing;
 use App\Domain\Listing\Models\ListingRevision;
@@ -133,6 +134,47 @@ class ListingController extends Controller
         $this->snapshot($l, 'published', $r->user()?->email ?? 'system');
 
         return ['ok' => true, 'data' => $l->fresh()];
+    }
+
+    /** ★ 分批把 listing 的效果图推到 OSS（避免一次请求镜像过多图导致网关超时） */
+    public function ossImages(Request $r)
+    {
+        $limit = max(1, min(10, (int) $r->input('limit', 3)));
+        $media = app(\App\Domain\Asset\Services\MediaService::class);
+
+        $pendingBase = fn () => Listing::whereNotNull('design_id')
+            ->whereHas('design', fn ($q) => $q->whereNotNull('main_image')->where('main_image', '!=', ''))
+            ->whereDoesntHave('assets', fn ($w) => $w->where('role', 'main'));
+
+        $rows = $pendingBase()->orderBy('id')->limit($limit)->get();
+
+        $processed = [];
+        foreach ($rows as $l) {
+            $design = Design::find($l->design_id);
+            if (! $design) { continue; }
+            $urls = [];
+            if ($design->main_image) { $urls[] = trim($design->main_image); }
+            foreach (array_filter(array_map('trim', explode('|', (string) $design->other_images))) as $u) { $urls[] = $u; }
+            if (! $urls) { continue; }
+            $oss = [];
+            foreach ($urls as $i => $u) {
+                $role = $i === 0 ? 'main' : ('other_' . $i);
+                try {
+                    $res = $media->mirror($u);
+                    $media->attach(['owner_type' => 'listing', 'owner_id' => $l->id, 'role' => $role, 'blob_id' => $res['blob']->id]);
+                    $oss[$i] = $res['blob']->public_url;
+                } catch (\Throwable $e) { /* 单张失败不影响 */ }
+            }
+            if ($oss) {
+                if (isset($oss[0])) { $design->main_image = $oss[0]; }
+                $rest = array_slice($oss, 1);
+                if ($rest) { $design->other_images = implode('|', $rest); }
+                $design->save();
+            }
+            $processed[] = $l->sku;
+        }
+
+        return ['ok' => true, 'data' => ['processed' => $processed, 'remaining' => $pendingBase()->count()]];
     }
 
     public function children($id)

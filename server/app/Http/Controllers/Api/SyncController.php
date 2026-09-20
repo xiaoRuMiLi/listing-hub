@@ -160,10 +160,17 @@ class SyncController extends Controller
                     $existing->revision = (int) $existing->revision + 1;
                     $existing->save();
                     $stats['listings']['updated']++;
+                    $model = $existing;
                 } else {
                     $row['revision'] = 1;
-                    Listing::create($row);
+                    $model = Listing::create($row);
                     $stats['listings']['created']++;
+                }
+
+                // ★ 若显式要求（sync_images），推 listing 时把效果图一起镜像 OSS
+                //   默认关（避免一次请求镜像过多图 → 网关超时）；图片走"分批"接口 /listings/oss-images
+                if (! empty($payload['sync_images'])) {
+                    $this->syncListingImages($l, $model, $design);
                 }
             }
         });
@@ -219,6 +226,37 @@ class SyncController extends Controller
         }
 
         return ['ok' => true, 'data' => $out];
+    }
+
+    /** 推送 listing 时同步其效果图：镜像 OSS + 挂为该 listing 资产；并把设计图指向 OSS */
+    private function syncListingImages(array $payload, Listing $listing, ?Design $design): void
+    {
+        $urls = [];
+        if (! empty($payload['images']) && is_array($payload['images'])) {
+            $urls = array_values(array_filter(array_map('trim', $payload['images'])));
+        } elseif ($design) {
+            if ($design->main_image) { $urls[] = trim($design->main_image); }
+            foreach (array_filter(array_map('trim', explode('|', (string) $design->other_images))) as $u) { $urls[] = $u; }
+        }
+        if (! $urls) { return; }
+
+        $media = app(\App\Domain\Asset\Services\MediaService::class);
+        $oss = [];
+        foreach ($urls as $i => $u) {
+            if ($u === '') { continue; }
+            $role = $i === 0 ? 'main' : ('other_' . $i);
+            try {
+                $res = $media->mirror($u);
+                $media->attach(['owner_type' => 'listing', 'owner_id' => $listing->id, 'role' => $role, 'blob_id' => $res['blob']->id]);
+                $oss[$i] = $res['blob']->public_url;
+            } catch (\Throwable $e) { /* 单张失败不影响整体 */ }
+        }
+        if ($design && $oss) {
+            if (isset($oss[0])) { $design->main_image = $oss[0]; }
+            $rest = array_slice($oss, 1);
+            if ($rest) { $design->other_images = implode('|', $rest); }
+            $design->save();
+        }
     }
 
     private function counts(): array

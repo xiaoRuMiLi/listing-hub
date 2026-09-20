@@ -37,6 +37,7 @@ Route::prefix('v1')->group(function () {
         Route::apiResource('designs', DesignController::class);
 
         // 上架域
+        Route::post('listings/oss-images', [ListingController::class, 'ossImages']);
         Route::get('listings/{id}/children', [ListingController::class, 'children']);
         Route::get('listings/{id}/revisions', [ListingController::class, 'revisions']);
         Route::post('listings/{id}/publish-result', [ListingController::class, 'publishResult']);
