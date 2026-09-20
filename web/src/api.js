@@ -44,6 +44,7 @@ export const Api = {
   updateProduct: (id, patch) => http.patch('/products/' + id, patch),
   revisions: (id) => http.get('/listings/' + id + '/revisions'),
   normalizeListing: (id) => http.post('/listings/' + id + '/normalize-images'),
+  switchCdn: (id) => http.post('/listings/' + id + '/switch-cdn'),
   normalizeDesign: (id) => http.post('/designs/' + id + '/normalize-images'),
 
   users: () => http.get('/users'),

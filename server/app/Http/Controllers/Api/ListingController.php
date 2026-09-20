@@ -184,6 +184,47 @@ class ListingController extends Controller
         return ['ok' => true, 'data' => $l->children()->get()];
     }
 
+    /** ★ 一键换图床：该 listing 的图片（无则取其设计）镜像 OSS 并改写；返回逐张结果 */
+    public function switchCdn($id)
+    {
+        $l = Listing::findOrFail($id);
+        $media = app(\App\Domain\Asset\Services\MediaService::class);
+        $allowed = (array) config('media.allowed_hosts', []);
+
+        $urls = [];
+        if ($l->main_image) { $urls[] = trim($l->main_image); }
+        foreach (array_filter(array_map('trim', explode('|', (string) $l->other_images))) as $u) { $urls[] = $u; }
+        if (! $urls && $l->design_id) {
+            $d = Design::find($l->design_id);
+            if ($d) {
+                if ($d->main_image) { $urls[] = trim($d->main_image); }
+                foreach (array_filter(array_map('trim', explode('|', (string) $d->other_images))) as $u) { $urls[] = $u; }
+            }
+        }
+        if (! $urls) { return ['ok' => true, 'data' => ['sku' => $l->sku, 'count' => 0, 'results' => [], 'note' => '无图片']]; }
+
+        $results = []; $ossUrls = [];
+        foreach ($urls as $i => $u) {
+            $role = $i === 0 ? 'main' : ('other_' . $i);
+            $host = parse_url($u, PHP_URL_HOST) ?: '';
+            $already = $host && in_array($host, $allowed, true);
+            try {
+                $res = $media->mirror($u);
+                $media->attach(['owner_type' => 'listing', 'owner_id' => $l->id, 'role' => $role, 'blob_id' => $res['blob']->id]);
+                $ossUrls[] = $res['blob']->public_url;
+                $results[] = ['role' => $role, 'from' => $u, 'to' => $res['blob']->public_url, 'status' => $already ? 'already' : 'ok', 'deduped' => $res['deduped']];
+            } catch (\Throwable $e) {
+                $ossUrls[] = $u;
+                $results[] = ['role' => $role, 'from' => $u, 'to' => null, 'status' => 'error', 'error' => $e->getMessage()];
+            }
+        }
+        $l->main_image = $ossUrls[0] ?? $l->main_image;
+        $l->other_images = (count($ossUrls) > 1) ? implode('|', array_slice($ossUrls, 1)) : $l->other_images;
+        $l->save();
+
+        return ['ok' => true, 'data' => ['sku' => $l->sku, 'count' => count($results), 'results' => $results]];
+    }
+
     /** ★ 图片 URL 归一：把 attrs_json 里的指纹图片字段 → 镜像 OSS → 改写为自有 URL */
     public function normalizeImages(Request $r, $id)
     {

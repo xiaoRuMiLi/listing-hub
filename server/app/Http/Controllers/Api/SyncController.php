@@ -121,6 +121,15 @@ class SyncController extends Controller
                 }
                 $design = ! empty($l['design_code']) ? Design::where('design_code', $l['design_code'])->first() : null;
 
+                // 该 listing 的图片（显式 images 优先；否则取其设计的效果图）
+                $imgs = [];
+                if (! empty($l['images']) && is_array($l['images'])) {
+                    $imgs = array_values(array_filter(array_map('trim', $l['images'])));
+                } elseif ($design) {
+                    if ($design->main_image) { $imgs[] = trim($design->main_image); }
+                    foreach (array_filter(array_map('trim', explode('|', (string) $design->other_images))) as $u) { $imgs[] = $u; }
+                }
+
                 $existing = Listing::where('account_id', $acc->id)->where('marketplace', $mp)->where('sku', $sku)->first();
 
                 $row = [
@@ -146,6 +155,8 @@ class SyncController extends Controller
                     'is_custom' => (bool) ($l['is_custom'] ?? true),
                     'customization_json' => $l['customization_json'] ?? null,
                     'attrs_json' => $l['attrs_json'] ?? null,
+                    'main_image' => $imgs[0] ?? null,
+                    'other_images' => (count($imgs) > 1) ? implode('|', array_slice($imgs, 1)) : null,
                 ];
                 if ($prod === null) { unset($row['product_id']); }
                 if ($design === null) { unset($row['design_id']); }

@@ -231,6 +231,10 @@ async function cmdImport(dir) {
     if (p.remaining <= 0 || p.processed.length === 0 || ++guard > 500) break;
   }
   console.log('✅ 效果图推送结束');
+
+  // ★ 本地同步：把本地 CSV 的图片也换成 OSS 图床（url_hash 命中→不再下载，很快）
+  console.log('🔄 本地同步为 OSS 图床…');
+  await cmdOssify(dir);
 }
 
 async function cmdPush(file) {

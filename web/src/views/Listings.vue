@@ -15,6 +15,9 @@
       <el-input v-model="f.sku" placeholder="SKU 搜索" clearable style="width:260px" @keyup.enter="reload" />
       <el-button type="primary" @click="reload">查询</el-button>
       <el-button @click="reset">重置</el-button>
+      <el-button type="warning" :loading="cdnBatch" @click="switchCdnAll">🖼 批量换图床(本页)</el-button>
+      <el-progress v-if="cdnProgress.total" :percentage="cdnPct" :status="cdnProgress.done>=cdnProgress.total?'success':''" style="width:170px" />
+      <span class="muted" v-if="cdnProgress.total">{{ cdnProgress.done }}/{{ cdnProgress.total }}</span>
       <span class="muted">共 {{ total }} 条</span>
     </div>
 
@@ -35,6 +38,9 @@
         <template #default="{ row }">{{ row.price ? (((row.currency || '') + ' ' + row.price).trim()) : '-' }}</template>
       </el-table-column>
       <el-table-column prop="asin" label="ASIN" width="130" />
+      <el-table-column label="图床" width="90">
+        <template #default="{ row }"><el-button size="small" link type="warning" @click.stop="switchCdnOne(row)">🖼 换床</el-button></template>
+      </el-table-column>
     </el-table>
 
     <el-pagination style="margin-top:12px" layout="prev, pager, next, sizes, total"
@@ -68,6 +74,16 @@
         </el-form>
         <el-button type="primary" :loading="saving" @click="save">保存</el-button>
         <span class="muted" style="margin-left:8px">带 revision 乐观锁（冲突会提示）</span>
+
+        <h4 style="margin-top:16px">图片 · 一键换图床</h4>
+        <div class="row" style="margin:6px 0 8px">
+          <el-button type="warning" size="small" :loading="cdnCur" @click="switchCdnCur">🖼 一键换图床</el-button>
+          <span class="muted" v-if="curCdn">{{ curCdn }}</span>
+        </div>
+        <div class="gallery">
+          <a v-for="(u, i) in listImgs" :key="i" :href="u" target="_blank" rel="noopener"><img :src="u" class="shot" /></a>
+        </div>
+        <div v-if="!listImgs.length" class="muted">本 listing 暂无图片记录（重跑 hub import 会上传）</div>
 
         <h4 style="margin-top:16px">上架图片（{{ assets.length }}）</h4>
         <div class="gallery">
@@ -126,6 +142,53 @@ async function open(row) {
   drawer.value = true;
 }
 const assets = computed(() => (cur.value && cur.value.assets) || []);
+
+// 一键换图床
+const cdnBatch = ref(false);
+const cdnCur = ref(false);
+const cdnCurMsg = ref('');
+const cdnProgress = ref({ done: 0, total: 0 });
+const cdnPct = computed(() => (cdnProgress.value.total ? Math.round((cdnProgress.value.done / cdnProgress.value.total) * 100) : 0));
+const curCdn = computed(() => cdnCurMsg.value);
+const listImgs = computed(() => {
+  const out = [];
+  if (cur.value && cur.value.main_image) out.push(cur.value.main_image);
+  if (cur.value && cur.value.other_images) String(cur.value.other_images).split('|').map((s) => s.trim()).filter(Boolean).forEach((u) => out.push(u));
+  return out;
+});
+
+async function switchCdnOne(row) {
+  try { const { data } = await Api.switchCdn(row.id); ElMessage.success('换床 ' + row.sku + '：' + data.data.count + ' 张'); load(); }
+  catch (e) { ElMessage.error('换床失败：' + row.sku); }
+}
+async function switchCdnCur() {
+  cdnCur.value = true; cdnCurMsg.value = '处理中…';
+  try {
+    const { data } = await Api.switchCdn(cur.value.id);
+    const r = data.data.results || [];
+    const ok = r.filter((x) => x.status === 'ok').length;
+    const already = r.filter((x) => x.status === 'already').length;
+    const err = r.filter((x) => x.status === 'error').length;
+    cdnCurMsg.value = `共 ${data.data.count} 张：新换 ${ok} · 已是OSS ${already}${err ? (' · 失败 ' + err) : ''}`;
+    ElMessage.success('换图床完成');
+    const det = await Api.listing(cur.value.id, { with_assets: 1 }); cur.value = det.data.data;
+    load();
+  } catch (e) { cdnCurMsg.value = '失败'; ElMessage.error('换图床失败'); }
+  finally { cdnCur.value = false; }
+}
+async function switchCdnAll() {
+  const list = rows.value.slice();
+  if (!list.length) return;
+  cdnProgress.value = { done: 0, total: list.length }; cdnBatch.value = true;
+  let ok = 0;
+  for (const r of list) {
+    try { await Api.switchCdn(r.id); ok++; } catch (e) { /* skip */ }
+    cdnProgress.value.done++;
+  }
+  cdnBatch.value = false;
+  ElMessage.success('批量换床完成：' + ok + '/' + list.length);
+  load();
+}
 const prettyAttrs = computed(() => (cur.value && cur.value.attrs_json) ? JSON.stringify(cur.value.attrs_json, null, 2) : '(空)');
 
 async function save() {

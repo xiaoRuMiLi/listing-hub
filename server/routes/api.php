@@ -38,6 +38,7 @@ Route::prefix('v1')->group(function () {
 
         // 上架域
         Route::post('listings/oss-images', [ListingController::class, 'ossImages']);
+        Route::post('listings/{id}/switch-cdn', [ListingController::class, 'switchCdn']);
         Route::get('listings/{id}/children', [ListingController::class, 'children']);
         Route::get('listings/{id}/revisions', [ListingController::class, 'revisions']);
         Route::post('listings/{id}/publish-result', [ListingController::class, 'publishResult']);
