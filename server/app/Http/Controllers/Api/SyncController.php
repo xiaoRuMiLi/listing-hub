@@ -32,7 +32,7 @@ class SyncController extends Controller
         $stats = ['products' => $this->counts(), 'designs' => $this->counts(), 'listings' => $this->counts(), 'product_shipping' => $this->counts()];
         $conflicts = [];
 
-        DB::transaction(function () use ($payload, &$stats, &$conflicts) {
+        DB::transaction(function () use ($r, $payload, &$stats, &$conflicts) {
             // ① 商品
             foreach (($payload['products'] ?? []) as $p) {
                 $code = (string) ($p['code'] ?? '');
@@ -40,16 +40,26 @@ class SyncController extends Controller
                 $existing = Product::where('code', $code)->first();
                 $attrs = [
                     'code' => $code,
+                    'spu_code' => $p['spu_code'] ?? null,
+                    'is_custom' => isset($p['is_custom']) ? (bool) $p['is_custom'] : null,
+                    'factory' => $p['factory'] ?? null,
                     'cn_name' => $p['cn_name'] ?? null,
                     'en_name' => $p['en_name'] ?? null,
                     'material_cn' => $p['material_cn'] ?? null,
                     'material_en' => $p['material_en'] ?? null,
                     'print_face_w' => $p['print_face_w'] ?? null,
                     'print_face_h' => $p['print_face_h'] ?? null,
+                    'variants_count' => $p['variants_count'] ?? null,
+                    'weight_g' => $p['weight_g'] ?? null,
+                    'volume_cm3' => $p['volume_cm3'] ?? null,
+                    'design_face_count' => $p['design_face_count'] ?? null,
                     'min_price' => $p['min_price'] ?? null,
                     'currency' => $p['currency'] ?? null,
                     'status' => $this->safeEnum($p['status'] ?? null, ['draft', 'ready', 'synced', 'archived'], 'synced'),
                     'detail_json' => $p['detail_json'] ?? null,
+                    // R3：长尾字段桶（8国运费/售价组 + 尺寸/包装 + 默认值 + 批发档价 + 其他）
+                    'profile_json' => $p['profile_json'] ?? null,
+                    'pushed_by' => $this->pushedBy($r, $payload),
                 ];
                 if ($existing) { $existing->update($attrs); $stats['products']['updated']++; }
                 else { Product::create($attrs); $stats['products']['created']++; }
@@ -85,6 +95,13 @@ class SyncController extends Controller
                     'effect_count' => $d['effect_count'] ?? null,
                     'main_image' => $d['main_image'] ?? null,
                     'other_images' => $d['other_images'] ?? null,
+                    // R4：adjust_json 列早已存在（建表即有）—— 之前 push 漏写，此处补上
+                    'adjust_json' => $d['adjust_json'] ?? null,
+                    'design_zh_name' => $d['design_zh_name'] ?? null,
+                    'design_zh_tags' => $d['design_zh_tags'] ?? null,
+                    'design_en_name' => $d['design_en_name'] ?? null,
+                    'design_en_tags' => $d['design_en_tags'] ?? null,
+                    'pushed_by' => $this->pushedBy($r, $payload),
                     'status' => $this->safeEnum($d['status'] ?? null, ['draft', 'active', 'superseded', 'archived'], 'active'),
                 ];
                 if ($prod === null) { unset($row['product_id']); }
@@ -141,11 +158,14 @@ class SyncController extends Controller
                     'sku' => $sku,
                     'parent_sku' => $l['parent_sku'] ?? null,
                     'is_parent' => array_key_exists('is_parent', $l) ? (bool) $l['is_parent'] : empty($l['parent_sku']),
+                    'parent_row_id' => $l['parent_row_id'] ?? null,
                     'variation_theme' => $l['variation_theme'] ?? null,
                     'variant_color' => $l['variant_color'] ?? null,
                     'variant_size' => $l['variant_size'] ?? null,
+                    'variant_code' => $l['variant_code'] ?? null,
                     'amazon_product_type' => $l['amazon_product_type'] ?? null,
-                    'status' => $this->safeEnum($l['status'] ?? null, ['draft', 'candidate', 'ready', 'published', 'error', 'archived'], 'candidate'),
+                    // R5：status 枚举已扩 planned；safeEnum 白名单同步
+                    'status' => $this->safeEnum($l['status'] ?? null, ['draft', 'candidate', 'planned', 'ready', 'published', 'error', 'archived'], 'candidate'),
                     'price' => $l['price'] ?? null,
                     'product_price' => $l['product_price'] ?? null,
                     'shipping_fee' => $l['shipping_fee'] ?? null,
@@ -155,6 +175,14 @@ class SyncController extends Controller
                     'is_custom' => (bool) ($l['is_custom'] ?? true),
                     'customization_json' => $l['customization_json'] ?? null,
                     'attrs_json' => $l['attrs_json'] ?? null,
+                    // R2：关联键冗余（物理列，供跨表 join 与拉回还原）
+                    'design_code' => $l['design_code'] ?? null,
+                    'product_code' => $l['product_code'] ?? null,
+                    // R2：刊登文案桶（26 个文案/属性字段，键名对齐本地 listing_copy.csv）
+                    'copy_json' => $l['copy_json'] ?? null,
+                    // R5：变体长尾桶（source/generated_at/notes 等）
+                    'variant_json' => $l['variant_json'] ?? null,
+                    'pushed_by' => $this->pushedBy($r, $payload),
                     'main_image' => $imgs[0] ?? null,
                     'other_images' => (count($imgs) > 1) ? implode('|', array_slice($imgs, 1)) : null,
                 ];
@@ -208,10 +236,16 @@ class SyncController extends Controller
             $q = Product::query();
             if ($since) { $q->where('updated_at', '>=', $since); }
             $out['products'] = $q->get()->map(fn ($p) => [
-                'code' => $p->code, 'cn_name' => $p->cn_name, 'en_name' => $p->en_name,
+                'code' => $p->code, 'spu_code' => $p->spu_code, 'is_custom' => $p->is_custom,
+                'factory' => $p->factory,
+                'cn_name' => $p->cn_name, 'en_name' => $p->en_name,
                 'material_cn' => $p->material_cn, 'material_en' => $p->material_en,
                 'print_face_w' => $p->print_face_w, 'print_face_h' => $p->print_face_h,
+                'variants_count' => $p->variants_count, 'weight_g' => $p->weight_g,
+                'volume_cm3' => $p->volume_cm3, 'design_face_count' => $p->design_face_count,
                 'min_price' => $p->min_price, 'currency' => $p->currency, 'status' => $p->status,
+                'detail_json' => $p->detail_json, 'profile_json' => $p->profile_json,
+                'pushed_by' => $p->pushed_by,
                 'updated_at' => $p->updated_at,
             ])->values();
         }
@@ -220,7 +254,16 @@ class SyncController extends Controller
             if ($since) { $q->where('updated_at', '>=', $since); }
             $out['designs'] = $q->get()->map(fn ($d) => [
                 'design_code' => $d->design_code, 'design_key' => $d->design_key, 'version' => $d->version,
-                'pattern' => $d->pattern, 'template' => $d->template, 'status' => $d->status,
+                'parent_code' => $d->parent_code, 'source' => $d->source,
+                'adjust_json' => $d->adjust_json,
+                'cn_name' => $d->cn_name, 'en_name' => $d->en_name,
+                'design_zh_name' => $d->design_zh_name, 'design_zh_tags' => $d->design_zh_tags,
+                'design_en_name' => $d->design_en_name, 'design_en_tags' => $d->design_en_tags,
+                'pattern' => $d->pattern, 'template' => $d->template,
+                'gallery_codes' => $d->gallery_codes, 'effect_count' => $d->effect_count,
+                'main_image' => $d->main_image, 'other_images' => $d->other_images,
+                'status' => $d->status, 'notes' => $d->notes,
+                'pushed_by' => $d->pushed_by,
                 'updated_at' => $d->updated_at,
             ])->values();
         }
@@ -231,8 +274,20 @@ class SyncController extends Controller
             $out['listings'] = $q->get()->map(fn ($l) => [
                 'sku' => $l->sku, 'marketplace' => $l->marketplace, 'status' => $l->status,
                 'parent_sku' => $l->parent_sku, 'is_parent' => $l->is_parent,
-                'price' => $l->price, 'currency' => $l->currency, 'asin' => $l->asin,
-                'attrs_json' => $l->attrs_json, 'updated_at' => $l->updated_at,
+                'variation_theme' => $l->variation_theme,
+                'variant_color' => $l->variant_color, 'variant_size' => $l->variant_size,
+                'variant_code' => $l->variant_code,
+                'amazon_product_type' => $l->amazon_product_type,
+                'price' => $l->price, 'product_price' => $l->product_price,
+                'shipping_fee' => $l->shipping_fee, 'currency' => $l->currency,
+                'quantity' => $l->quantity, 'asin' => $l->asin,
+                'main_image' => $l->main_image, 'other_images' => $l->other_images,
+                'attrs_json' => $l->attrs_json,
+                'design_code' => $l->design_code, 'product_code' => $l->product_code,
+                'parent_row_id' => $l->parent_row_id,
+                'copy_json' => $l->copy_json, 'variant_json' => $l->variant_json,
+                'pushed_by' => $l->pushed_by,
+                'updated_at' => $l->updated_at,
             ])->values();
         }
 
@@ -275,6 +330,16 @@ class SyncController extends Controller
         return ['created' => 0, 'updated' => 0, 'skipped' => 0];
     }
 
+    /** 推送者标识（按用户要求留痕）：machine_id + 登录账号 email */
+    private function pushedBy(\Illuminate\Http\Request $r, array $payload): ?string
+    {
+        $machine = $payload['machine_id'] ?? null;
+        $email = optional($r->user())->email;
+        $parts = array_values(array_filter([$machine, $email]));
+
+        return $parts ? implode('@', $parts) : null;
+    }
+
     // ============ CSV 包导出（列对齐现有 database/*.csv，落地即用） ============
 
     private const H_PRODUCTS = ['id','spu_code','cn_name','en_name','alias','factory','material','material_en','technology','release_time','is_custom','default_color_id','default_color_name','default_size_id','default_size_name','variant_id','variant_code','variants_count','colors','sizes','size_L_cm','size_W_cm','size_H_cm','package_L_cm','package_W_cm','package_H_cm','volume_cm3','weight_g','design_face_w','design_face_h','design_face_count','min_price','qty_from','qty_to','retail_price','gold_price','platinum_price','diamond_price','black_diamond_price','star_diamond_price','shipping_US','shipping_UK','shipping_CA','shipping_DE','shipping_MX','shipping_FR','shipping_ES','shipping_IT','shipping_channel_US','shipping_channel_UK','shipping_channel_CA','shipping_channel_DE','shipping_channel_MX','shipping_channel_FR','shipping_channel_ES','shipping_channel_IT','freight_template_US','freight_template_UK','freight_template_CA','freight_template_DE','freight_template_MX','freight_template_FR','freight_template_ES','freight_template_IT','shipping_updated_at','price_US','price_UK','price_CA','price_DE','price_MX','price_FR','price_ES','price_IT','price_currency','rate_note','status','notes','created_at','updated_at'];
@@ -290,40 +355,116 @@ class SyncController extends Controller
         switch ($dataset) {
             case 'products':
                 $q = Product::query(); if ($since) { $q->where('updated_at', '>=', $since); }
-                $rows = $q->get()->map(fn ($p) => [
-                    'id' => $p->code, 'cn_name' => $p->cn_name, 'en_name' => $p->en_name,
-                    'material' => $p->material_cn, 'material_en' => $p->material_en,
-                    'min_price' => $p->min_price, 'price_currency' => $p->currency,
-                    'status' => $p->status, 'design_face_w' => $p->print_face_w, 'design_face_h' => $p->print_face_h,
-                    'created_at' => $p->created_at, 'updated_at' => $p->updated_at,
-                ])->all();
+                $rows = $q->get()->map(function ($p) {
+                    // R3：长尾字段还原自 profile_json 桶（键名对齐本地 products.csv 列名）
+                    $prof = is_array($p->profile_json) ? $p->profile_json : [];
+                    $g = fn ($col) => $prof[$col] ?? '';
+
+                    return [
+                        'id' => $p->code, 'spu_code' => $p->spu_code, 'alias' => $g('alias'),
+                        'factory' => $p->factory,
+                        'cn_name' => $p->cn_name, 'en_name' => $p->en_name,
+                        'material' => $p->material_cn, 'material_en' => $p->material_en,
+                        'technology' => $g('technology'), 'release_time' => $g('release_time'),
+                        'is_custom' => $p->is_custom === null ? '' : ($p->is_custom ? '1' : '0'),
+                        'default_color_id' => $g('default_color_id'), 'default_color_name' => $g('default_color_name'),
+                        'default_size_id' => $g('default_size_id'), 'default_size_name' => $g('default_size_name'),
+                        'variant_id' => $g('variant_id'), 'variant_code' => $g('variant_code'),
+                        'variants_count' => $p->variants_count, 'colors' => $g('colors'), 'sizes' => $g('sizes'),
+                        'size_L_cm' => $g('size_L_cm'), 'size_W_cm' => $g('size_W_cm'), 'size_H_cm' => $g('size_H_cm'),
+                        'package_L_cm' => $g('package_L_cm'), 'package_W_cm' => $g('package_W_cm'), 'package_H_cm' => $g('package_H_cm'),
+                        'volume_cm3' => $p->volume_cm3, 'weight_g' => $p->weight_g,
+                        'design_face_w' => $p->print_face_w, 'design_face_h' => $p->print_face_h,
+                        'design_face_count' => $p->design_face_count,
+                        'min_price' => $p->min_price,
+                        'qty_from' => $g('qty_from'), 'qty_to' => $g('qty_to'),
+                        'retail_price' => $g('retail_price'), 'gold_price' => $g('gold_price'),
+                        'platinum_price' => $g('platinum_price'), 'diamond_price' => $g('diamond_price'),
+                        'black_diamond_price' => $g('black_diamond_price'), 'star_diamond_price' => $g('star_diamond_price'),
+                        'shipping_US' => $g('shipping_US'), 'shipping_UK' => $g('shipping_UK'),
+                        'shipping_CA' => $g('shipping_CA'), 'shipping_DE' => $g('shipping_DE'),
+                        'shipping_MX' => $g('shipping_MX'), 'shipping_FR' => $g('shipping_FR'),
+                        'shipping_ES' => $g('shipping_ES'), 'shipping_IT' => $g('shipping_IT'),
+                        'shipping_channel_US' => $g('shipping_channel_US'), 'shipping_channel_UK' => $g('shipping_channel_UK'),
+                        'shipping_channel_CA' => $g('shipping_channel_CA'), 'shipping_channel_DE' => $g('shipping_channel_DE'),
+                        'shipping_channel_MX' => $g('shipping_channel_MX'), 'shipping_channel_FR' => $g('shipping_channel_FR'),
+                        'shipping_channel_ES' => $g('shipping_channel_ES'), 'shipping_channel_IT' => $g('shipping_channel_IT'),
+                        'freight_template_US' => $g('freight_template_US'), 'freight_template_UK' => $g('freight_template_UK'),
+                        'freight_template_CA' => $g('freight_template_CA'), 'freight_template_DE' => $g('freight_template_DE'),
+                        'freight_template_MX' => $g('freight_template_MX'), 'freight_template_FR' => $g('freight_template_FR'),
+                        'freight_template_ES' => $g('freight_template_ES'), 'freight_template_IT' => $g('freight_template_IT'),
+                        'shipping_updated_at' => $g('shipping_updated_at'),
+                        'price_US' => $g('price_US'), 'price_UK' => $g('price_UK'),
+                        'price_CA' => $g('price_CA'), 'price_DE' => $g('price_DE'),
+                        'price_MX' => $g('price_MX'), 'price_FR' => $g('price_FR'),
+                        'price_ES' => $g('price_ES'), 'price_IT' => $g('price_IT'),
+                        'price_currency' => $p->currency, 'rate_note' => $g('rate_note'),
+                        'status' => $p->status, 'notes' => $g('notes'),
+                        'created_at' => $p->created_at, 'updated_at' => $p->updated_at,
+                    ];
+                })->all();
 
                 return $this->csvResponse('products.csv', self::H_PRODUCTS, $rows);
 
             case 'listing_copy':
                 $q = Listing::where('is_parent', true); if ($since) { $q->where('updated_at', '>=', $since); } if ($mp) { $q->where('marketplace', strtoupper($mp)); }
-                $rows = $q->get()->map(fn ($l) => [
-                    'id' => $codeOf[$l->product_id] ?? null, 'design_code' => $designCode[$l->design_id] ?? null,
-                    'marketplace' => $l->marketplace, 'product_type' => $l->amazon_product_type, 'sku' => $l->sku,
-                    'price' => $l->price, 'currency' => $l->currency, 'status' => $l->status,
-                    'shipping_fee' => $l->shipping_fee, 'product_price' => $l->product_price,
-                    'attrs_json' => $l->attrs_json ? json_encode($l->attrs_json, JSON_UNESCAPED_UNICODE) : '',
-                    'row_id' => $l->id, 'edited_at' => $l->updated_at,
-                ])->all();
+                $rows = $q->get()->map(function ($l) use ($codeOf, $designCode) {
+                    // ★ R2 修复：文案 26 列还原自 copy_json 桶（键名对齐本地 listing_copy.csv 列名）
+                    //   此前该 case 完全没读桶 → CSV 导出文案全空（JSON 通道有值）
+                    $copy = is_array($l->copy_json) ? $l->copy_json : [];
+                    $c = fn ($col) => $copy[$col] ?? '';
+
+                    return [
+                        'id' => $l->product_code ?: ($codeOf[$l->product_id] ?? null),
+                        'design_code' => $l->design_code ?: ($designCode[$l->design_id] ?? null),
+                        'marketplace' => $l->marketplace, 'product_type' => $l->amazon_product_type, 'sku' => $l->sku,
+                        // ── 文案桶还原（26 列）──
+                        'item_name' => $c('item_name'), 'highlight' => $c('highlight'),
+                        'bullet_1' => $c('bullet_1'), 'bullet_2' => $c('bullet_2'), 'bullet_3' => $c('bullet_3'),
+                        'bullet_4' => $c('bullet_4'), 'bullet_5' => $c('bullet_5'),
+                        'product_description' => $c('product_description'), 'generic_keyword' => $c('generic_keyword'),
+                        'material' => $c('material'), 'fabric_type' => $c('fabric_type'),
+                        'color' => $c('color'), 'size' => $c('size'),
+                        'capacity' => $c('capacity'), 'capacity_unit' => $c('capacity_unit'),
+                        'model_number' => $c('model_number'), 'model_name' => $c('model_name'),
+                        'handling_time' => $c('handling_time'), 'country_of_origin' => $c('country_of_origin'),
+                        'template' => $c('template'), 'amazon_template' => $c('amazon_template'),
+                        'source' => $c('source'), 'generated_at' => $c('generated_at'),
+                        'updated_by' => $c('updated_by'), 'review_notes' => $c('review_notes'), 'notes' => $c('notes'),
+                        // ── 物理列 ──
+                        'price' => $l->price, 'currency' => $l->currency, 'status' => $l->status,
+                        'shipping_fee' => $l->shipping_fee, 'product_price' => $l->product_price,
+                        'attrs_json' => $l->attrs_json ? json_encode($l->attrs_json, JSON_UNESCAPED_UNICODE) : '',
+                        'row_id' => $l->id, 'edited_at' => $l->updated_at,
+                    ];
+                })->all();
 
                 return $this->csvResponse('listing_copy.csv', self::H_LISTING_COPY, $rows);
 
             case 'listing_variants':
                 $q = Listing::where('is_parent', false); if ($since) { $q->where('updated_at', '>=', $since); } if ($mp) { $q->where('marketplace', strtoupper($mp)); }
-                $rows = $q->get()->map(fn ($l) => [
-                    'row_id' => $l->id, 'id' => $codeOf[$l->product_id] ?? null, 'marketplace' => $l->marketplace,
-                    'sku' => $l->sku, 'parent_sku' => $l->parent_sku, 'variation_theme' => $l->variation_theme,
-                    'variant_value' => trim(($l->variant_color ?? '') . ' ' . ($l->variant_size ?? '')),
-                    'variant_color' => $l->variant_color, 'variant_size' => $l->variant_size,
-                    'design_code' => $designCode[$l->design_id] ?? null,
-                    'price' => $l->price, 'product_price' => $l->product_price, 'shipping_fee' => $l->shipping_fee,
-                    'quantity' => $l->quantity, 'status' => $l->status, 'edited_at' => $l->updated_at,
-                ])->all();
+                $rows = $q->get()->map(function ($l) use ($codeOf, $designCode) {
+                    // R5：变体长尾字段还原自 variant_json 桶
+                    $vj = is_array($l->variant_json) ? $l->variant_json : [];
+                    $g = fn ($col) => $vj[$col] ?? '';
+
+                    return [
+                        'row_id' => $l->id, 'parent_row_id' => $l->parent_row_id,
+                        'id' => $l->product_code ?: ($codeOf[$l->product_id] ?? null),
+                        'marketplace' => $l->marketplace,
+                        'sku' => $l->sku, 'parent_sku' => $l->parent_sku, 'variation_theme' => $l->variation_theme,
+                        'variant_value' => $g('variant_value') !== '' ? $g('variant_value') : trim(($l->variant_color ?? '') . ' ' . ($l->variant_size ?? '')),
+                        'variant_code' => $l->variant_code,
+                        'variant_color' => $l->variant_color, 'variant_size' => $l->variant_size,
+                        'design_code' => $l->design_code ?: ($designCode[$l->design_id] ?? null),
+                        // ★ R1 修复：图列此前在表头里但从未赋值 → CSV 导出恒为空（JSON 通道有值）
+                        'main_image' => $l->main_image, 'other_images' => $l->other_images,
+                        'price' => $l->price, 'product_price' => $l->product_price, 'shipping_fee' => $l->shipping_fee,
+                        'quantity' => $l->quantity, 'status' => $l->status,
+                        'source' => $g('source'), 'generated_at' => $g('generated_at'),
+                        'edited_at' => $l->updated_at, 'notes' => $g('notes'),
+                    ];
+                })->all();
 
                 return $this->csvResponse('listing_variants.csv', self::H_VARIANTS, $rows);
 
@@ -332,10 +473,18 @@ class SyncController extends Controller
                 $rows = $q->get()->map(fn ($d) => [
                     'design_code' => $d->design_code, 'product_id' => $codeOf[$d->product_id] ?? null,
                     'design_key' => $d->design_key, 'version' => $d->version, 'parent_code' => $d->parent_code,
-                    'source' => $d->source, 'cn_name' => $d->cn_name, 'en_name' => $d->en_name,
+                    'source' => $d->source,
+                    // R4：adjust 此前 push 未写 → 此处读出为 CSV 的 adjust 列
+                    'adjust' => $d->adjust_json ? (is_string($d->adjust_json) ? $d->adjust_json : json_encode($d->adjust_json, JSON_UNESCAPED_UNICODE)) : '',
+                    'cn_name' => $d->cn_name, 'en_name' => $d->en_name,
+                    'design_zh_name' => $d->design_zh_name, 'design_zh_tags' => $d->design_zh_tags,
+                    'design_en_name' => $d->design_en_name, 'design_en_tags' => $d->design_en_tags,
                     'design_pattern' => $d->pattern, 'design_template' => $d->template,
                     'gallery_codes' => $d->gallery_codes, 'effect_image_count' => $d->effect_count,
-                    'status' => $d->status, 'created_at' => $d->created_at, 'updated_at' => $d->updated_at,
+                    // ★ R1 修复：图列此前在表头里但从未赋值 → CSV 导出恒为空（JSON 通道有值）
+                    'main_image' => $d->main_image, 'other_images' => $d->other_images,
+                    'status' => $d->status, 'notes' => $d->notes,
+                    'created_at' => $d->created_at, 'updated_at' => $d->updated_at,
                 ])->all();
 
                 return $this->csvResponse('designs.csv', self::H_DESIGNS, $rows);

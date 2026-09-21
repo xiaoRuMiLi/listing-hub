@@ -21,6 +21,11 @@ class Listing extends Model
         'attrs_json' => 'array',
         'customization_json' => 'array',
         'missing_fields' => 'array',
+        // ★ R2–R5：新增的 JSON 桶必须 cast，否则 Eloquent 把数组当标量写库
+        //   → 落库成字符数组（2026-09-21 实测 copy_json 变 2967 个单字符键）
+        'copy_json' => 'array',
+        'variant_json' => 'array',
+        'parent_row_id' => 'integer',
         'first_published_at' => 'datetime',
         'published_at' => 'datetime',
     ];

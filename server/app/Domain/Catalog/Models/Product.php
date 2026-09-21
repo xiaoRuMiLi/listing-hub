@@ -15,6 +15,9 @@ class Product extends Model
 
     protected $casts = [
         'detail_json' => 'array',
+        // ★ R2–R5：新增的 JSON 桶必须 cast（同 Listing 模型）
+        'profile_json' => 'array',
+        'is_custom' => 'boolean',
     ];
 
     /** 供应商来源（多对多） */
