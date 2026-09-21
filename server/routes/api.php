@@ -41,7 +41,12 @@ Route::prefix('v1')->group(function () {
         Route::post('listings/{id}/switch-cdn', [ListingController::class, 'switchCdn']);
         Route::get('listings/{id}/children', [ListingController::class, 'children']);
         Route::get('listings/{id}/revisions', [ListingController::class, 'revisions']);
+        // ★ 上架/下架回写：支持按 id 或按 sku（异地/ERP 只需知道 SKU）
+        Route::get('listings/by-sku/{sku}', [ListingController::class, 'bySku']);
+        Route::post('listings/publish-result', [ListingController::class, 'publishResult']);
         Route::post('listings/{id}/publish-result', [ListingController::class, 'publishResult']);
+        Route::post('listings/unpublish', [ListingController::class, 'unpublish']);
+        Route::post('listings/{id}/unpublish', [ListingController::class, 'unpublish']);
         Route::post('listings/{id}/normalize-images', [ListingController::class, 'normalizeImages']);
         Route::apiResource('listings', ListingController::class);
 

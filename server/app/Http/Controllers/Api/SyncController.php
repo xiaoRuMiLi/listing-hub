@@ -286,6 +286,12 @@ class SyncController extends Controller
                 'design_code' => $l->design_code, 'product_code' => $l->product_code,
                 'parent_row_id' => $l->parent_row_id,
                 'copy_json' => $l->copy_json, 'variant_json' => $l->variant_json,
+                // ★ 上架/下架状态（异地/ERP 拉回即可知是否已上架）
+                'is_complete' => $l->is_complete, 'missing_fields' => $l->missing_fields,
+                'published_at' => $l->published_at, 'first_published_at' => $l->first_published_at,
+                'unpublished_at' => $l->unpublished_at, 'unpublish_reason' => $l->unpublish_reason,
+                'last_action' => $l->last_action, 'last_action_by' => $l->last_action_by,
+                'last_action_at' => $l->last_action_at,
                 'pushed_by' => $l->pushed_by,
                 'updated_at' => $l->updated_at,
             ])->values();

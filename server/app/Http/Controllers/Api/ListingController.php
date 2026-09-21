@@ -107,22 +107,57 @@ class ListingController extends Controller
         return ['ok' => true];
     }
 
-    /** ★ 本地发布后回写发布结果 */
-    public function publishResult(Request $r, $id)
+    /** ★ 按 SKU 反查 listing（异地/ERP 只需知道 SKU，不必知道中台内部 id） */
+    public function bySku(Request $r, $sku)
     {
-        $l = Listing::findOrFail($id);
+        $q = Listing::query()->where('sku', $sku);
+        if ($mp = $r->query('marketplace')) { $q->where('marketplace', strtoupper($mp)); }
+        $l = $q->first();
+        if (! $l) {
+            return response()->json(['ok' => false, 'error' => ['code' => 'not_found', 'message' => "SKU 未找到: {$sku}"]], 404);
+        }
+
+        return ['ok' => true, 'data' => $l];
+    }
+
+    /** 解析目标 listing：路由带 {id} 则按 id；否则从 body 的 sku(+marketplace) 反查 */
+    private function resolveListing(Request $r, $id = null): Listing
+    {
+        if ($id) { return Listing::findOrFail($id); }
+        $sku = (string) $r->input('sku', '');
+        if ($sku === '') {
+            abort(422, '需要 id（路径）或 sku（body）');
+        }
+        $q = Listing::query()->where('sku', $sku);
+        if ($mp = $r->input('marketplace')) { $q->where('marketplace', strtoupper($mp)); }
+        $l = $q->first();
+        if (! $l) { abort(404, "SKU 未找到: {$sku}"); }
+
+        return $l;
+    }
+
+    /** 操作人标识：body.actor 优先，否则登录账号 */
+    private function actor(Request $r): string
+    {
+        return (string) ($r->input('actor') ?: ($r->user()?->email ?? 'system'));
+    }
+
+    /** ★ 上架结果回写（支持按 id 或按 sku） */
+    public function publishResult(Request $r, $id = null)
+    {
+        $l = $this->resolveListing($r, $id);
         $data = $r->validate([
-            'status' => 'nullable|in:draft,candidate,ready,published,error,archived',
+            'status' => 'nullable|in:draft,candidate,planned,ready,published,error,archived',
             'asin' => 'nullable|string|max:16',
             'published_at' => 'nullable|date',
             'issues' => 'nullable|array',
         ]);
 
+        $when = isset($data['published_at']) ? \Illuminate\Support\Carbon::parse($data['published_at']) : now();
         $l->status = $data['status'] ?? 'published';
         if (! empty($data['asin'])) {
             $l->asin = $data['asin'];
         }
-        $when = isset($data['published_at']) ? \Illuminate\Support\Carbon::parse($data['published_at']) : now();
         $l->published_at = $when;
         $l->first_published_at = $l->first_published_at ?? $when;
         if (isset($data['issues'])) {
@@ -130,10 +165,48 @@ class ListingController extends Controller
             $attrs['_publish_issues'] = $data['issues'];
             $l->attrs_json = $attrs;
         }
+        // 动作留痕：谁在何时做了什么
+        $l->last_action = 'publish';
+        $l->last_action_by = $this->actor($r);
+        $l->last_action_at = now();
         $l->save();
-        $this->snapshot($l, 'published', $r->user()?->email ?? 'system');
+        $this->snapshot($l, 'published', $this->actor($r));
 
         return ['ok' => true, 'data' => $l->fresh()];
+    }
+
+    /** ★ 下架回写（支持按 id 或按 sku）
+     *  记录：unpublished_at / unpublish_reason / last_action*；status 默认 archived。
+     */
+    public function unpublish(Request $r, $id = null)
+    {
+        $l = $this->resolveListing($r, $id);
+        $data = $r->validate([
+            'status' => 'nullable|in:draft,candidate,planned,ready,published,error,archived',
+            'reason' => 'nullable|string|max:255',
+            'unpublished_at' => 'nullable|date',
+            'also_children' => 'nullable|boolean',
+        ]);
+
+        $when = isset($data['unpublished_at']) ? \Illuminate\Support\Carbon::parse($data['unpublished_at']) : now();
+        $targets = collect([$l]);
+        // 父体下架可选连带子体
+        if (! empty($data['also_children']) && $l->is_parent) {
+            $targets = $targets->merge($l->children()->get());
+        }
+
+        foreach ($targets as $t) {
+            $t->status = $data['status'] ?? 'archived';
+            $t->unpublished_at = $when;
+            $t->unpublish_reason = $data['reason'] ?? null;
+            $t->last_action = 'unpublish';
+            $t->last_action_by = $this->actor($r);
+            $t->last_action_at = now();
+            $t->save();
+            $this->snapshot($t, 'unpublished', $this->actor($r));
+        }
+
+        return ['ok' => true, 'data' => ['sku' => $l->sku, 'affected' => $targets->pluck('sku')->all()]];
     }
 
     /** ★ 分批把 listing 的效果图推到 OSS（避免一次请求镜像过多图导致网关超时） */
