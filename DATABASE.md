@@ -130,19 +130,41 @@
 
 索引：`INDEX(product_id)`，`INDEX(product_id, color)`，`INDEX(product_id, size)`。
 
+**写入（2026-09-29）**：`POST /sync/push` 顶层 **`product_variants[]`** 写入本表。
+- 幂等键：**`(product_id, external_variant_id)`**（`external_variant_id` = 指纹 `variantCode`，如 `ZSZ24B`）
+- 数据源：本地 `output/<id>/product.json` 的 `profile.variants[]`（指纹规格：颜色×尺寸 + 包装/重量）
+- 粒度：**指纹规格**（不是上架子体）。上架子体（`listing_variants`）经「款式+尺寸 → 尺寸规格 → 运费」倒查，不重复存。
+
+**读取**：`GET /sync/pull?scope=product_variants` → `data.product_variants[]`；`GET /sync/pull?format=csv&dataset=product_variants` → `product_variants.csv`。
+
+> ★ **软删（2026-09-29）**：本表已加 `deleted_at`（`SoftDeletes`）。unique 键 = `(product_id, external_variant_id, deleted_at)`（软删后可同名重建）。删除见 `DELETE-API-DESIGN.md`。
+
 ## 4. product_shipping（商品物流信息·从 product JSON 拆出）
 
 | 字段 | 类型 | 空 | 键 | 说明 |
 |---|---|---|---|---|
 | id | BIGINT UNSIGNED | N | PK | |
-| product_variant_id | BIGINT UNSIGNED | N | FK product_variants | |
+| product_variant_id | BIGINT UNSIGNED | Y | FK product_variants | 变体级运费挂此（逐规格×逐国） |
+| product_id | BIGINT UNSIGNED | Y | FK products | 商品级运费挂此（默认规格代表值） |
 | country | CHAR(2) | N | | 目的国 |
 | amount | DECIMAL(12,2) | Y | | 运费 |
 | currency | CHAR(3) | Y | | |
 | channel | VARCHAR(64) | Y | | 物流渠道 |
 | updated_at | TIMESTAMP | Y | | |
 
-索引：`UNIQUE(product_variant_id, country)`，`INDEX(country)`。
+索引：`UNIQUE(product_variant_id, country)`，`UNIQUE(product_id, country)`，`INDEX(country)`。
+
+> ★ **两种粒度并存**（migration `2026_09_20_000007` 后）：
+> - **商品级**（`product_id` 有值、`product_variant_id` 空）：默认规格的**代表值**，来自 `products.csv` 的 `shipping_*` 列 → push 的 **`product_shipping[]`**
+> - **变体级**（`product_variant_id` 有值）：**逐规格×逐国**真实运费 → push 的 **`variant_shipping[]`**（幂等键 `(product_variant_id, country)`）
+> - 数据源：本地 `output/<id>/shipping.json` 的 `byVariant[].countries`
+>
+> **读运费优先读 `profile_json`**（`shipping_US/UK/...` 桶）；`pullCsvOne` 导出 products 走「物理列优先 → `profile_json` 兜底」：`$p->shipping_US ?? $g('shipping_US')`。
+> 因此 `products` 表的独立 8 国列（`shipping_*`/`price_*`/`freight_template_*`）**通常为 NULL 属正常**——真值在 `profile_json`。
+
+**读取**：`GET /sync/pull?scope=product_shipping` → `data.product_shipping[]`；`GET /sync/pull?format=csv&dataset=product_shipping` → `product_shipping.csv`。
+
+> ★ **软删（2026-09-29）**：本表已加 `deleted_at`。unique 改复合：`(product_variant_id, country, deleted_at)` + `(product_id, country, deleted_at)`。
 
 ## 5. accounts（亚马逊账号/店铺）
 

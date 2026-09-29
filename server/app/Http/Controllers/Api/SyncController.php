@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Domain\Catalog\Models\Product;
 use App\Domain\Catalog\Models\ProductShipping;
 use App\Domain\Catalog\Models\ProductSupplier;
+use App\Domain\Catalog\Models\ProductVariant;
 use App\Domain\Catalog\Models\Supplier;
 use App\Domain\Design\Models\Design;
 use App\Domain\Identity\Models\Account;
@@ -30,7 +31,7 @@ class SyncController extends Controller
             'status' => 'running', 'started_at' => now(),
         ]);
 
-        $stats = ['products' => $this->counts(), 'designs' => $this->counts(), 'listings' => $this->counts(), 'variants' => $this->counts(), 'product_shipping' => $this->counts()];
+        $stats = ['products' => $this->counts(), 'designs' => $this->counts(), 'listings' => $this->counts(), 'variants' => $this->counts(), 'product_shipping' => $this->counts(), 'product_variants' => $this->counts(), 'variant_shipping' => $this->counts()];
         $conflicts = [];
 
         DB::transaction(function () use ($r, $payload, &$stats, &$conflicts) {
@@ -133,6 +134,49 @@ class SyncController extends Controller
                     ['amount' => $s['amount'] ?? null, 'currency' => $s['currency'] ?? null, 'channel' => $s['channel'] ?? null, 'updated_at' => now()],
                 );
                 $stats['product_shipping']['updated']++;
+            }
+
+            // ②b2 ★ 商品规格（product_variants）—— 指纹规格（颜色×尺寸），运费/包装的物理来源。
+            //      幂等键：(product_id, external_variant_id=指纹 variantCode)。
+            $variantIdMap = [];   // [product_code][external_variant_id] => product_variant_id
+            foreach (($payload['product_variants'] ?? []) as $pv) {
+                $prod = Product::where('code', (string) ($pv['product_code'] ?? ''))->first();
+                $ext = (string) ($pv['external_variant_id'] ?? '');
+                if ($prod === null || $ext === '') { continue; }
+                $row = ProductVariant::updateOrCreate(
+                    ['product_id' => $prod->id, 'external_variant_id' => $ext],
+                    [
+                        'color' => $pv['color'] ?? null,
+                        'size' => $pv['size'] ?? ($pv['size_id'] ?? null),
+                        'spec_json' => $pv['spec_json'] ?? null,
+                        'weight_g' => $pv['weight_g'] ?? null,
+                        'size_l_cm' => $pv['size_l_cm'] ?? null,
+                        'size_w_cm' => $pv['size_w_cm'] ?? null,
+                        'size_h_cm' => $pv['size_h_cm'] ?? null,
+                        'pkg_l_cm' => $pv['pkg_l_cm'] ?? ($pv['size_l_cm'] ?? null),
+                        'pkg_w_cm' => $pv['pkg_w_cm'] ?? ($pv['size_w_cm'] ?? null),
+                        'pkg_h_cm' => $pv['pkg_h_cm'] ?? ($pv['size_h_cm'] ?? null),
+                        'volume_cm3' => $pv['volume_cm3'] ?? null,
+                        'status' => $pv['status'] ?? 'synced',
+                    ],
+                );
+                $variantIdMap[(string) $pv['product_code']][$ext] = $row->id;
+                $stats['product_variants']['updated']++;
+            }
+
+            // ②b3 ★ 逐规格×逐国运费（变体级）—— external_variant_id → product_variant_id。
+            foreach (($payload['variant_shipping'] ?? []) as $vs) {
+                $pc = (string) ($vs['product_code'] ?? '');
+                $ext = (string) ($vs['external_variant_id'] ?? '');
+                $country = strtoupper((string) ($vs['country'] ?? ''));
+                if ($pc === '' || $ext === '' || $country === '') { continue; }
+                $vid = $variantIdMap[$pc][$ext] ?? optional(ProductVariant::where('external_variant_id', $ext)->first())->id;
+                if (! $vid) { continue; }
+                ProductShipping::updateOrCreate(
+                    ['product_variant_id' => $vid, 'country' => $country],
+                    ['amount' => $vs['amount'] ?? null, 'currency' => $vs['currency'] ?? null, 'channel' => $vs['channel'] ?? null, 'updated_at' => now()],
+                );
+                $stats['variant_shipping']['updated']++;
             }
 
             // ②c ★ 变体子体（独立表 listing_variants）—— 优先吃顶层 variants[]；
@@ -452,6 +496,39 @@ class SyncController extends Controller
             ])->values();
         }
 
+        // ★ 商品规格（指纹规格：颜色×尺寸 + 包装/重量）
+        if (in_array('product_variants', $scopes)) {
+            $q = ProductVariant::query();
+            if ($since) { $q->where('updated_at', '>=', $since); }
+            $codeOf = Product::pluck('code', 'id');
+            $out['product_variants'] = $q->get()->map(fn ($v) => [
+                'product_code' => $codeOf[$v->product_id] ?? null,
+                'external_variant_id' => $v->external_variant_id,
+                'color' => $v->color, 'size' => $v->size,
+                'spec_json' => $v->spec_json,
+                'weight_g' => $v->weight_g,
+                'size_l_cm' => $v->size_l_cm, 'size_w_cm' => $v->size_w_cm, 'size_h_cm' => $v->size_h_cm,
+                'pkg_l_cm' => $v->pkg_l_cm, 'pkg_w_cm' => $v->pkg_w_cm, 'pkg_h_cm' => $v->pkg_h_cm,
+                'volume_cm3' => $v->volume_cm3, 'status' => $v->status,
+                'updated_at' => $v->updated_at,
+            ])->values();
+        }
+
+        // ★ 商品运费（商品级 + 变体级；含 country/amount/channel）
+        if (in_array('product_shipping', $scopes)) {
+            $q = ProductShipping::query();
+            if ($since) { $q->where('updated_at', '>=', $since); }
+            $codeOf = Product::pluck('code', 'id');
+            $extOf = ProductVariant::pluck('external_variant_id', 'id');
+            $out['product_shipping'] = $q->get()->map(fn ($s) => [
+                'product_code' => $s->product_id ? ($codeOf[$s->product_id] ?? null) : null,
+                'external_variant_id' => $s->product_variant_id ? ($extOf[$s->product_variant_id] ?? null) : null,
+                'country' => $s->country, 'amount' => $s->amount,
+                'currency' => $s->currency, 'channel' => $s->channel,
+                'updated_at' => $s->updated_at,
+            ])->values();
+        }
+
         return ['ok' => true, 'data' => $out];
     }
 
@@ -507,6 +584,8 @@ class SyncController extends Controller
     private const H_LISTING_COPY = ['id','design_code','marketplace','product_type','sku','item_name','highlight','bullet_1','bullet_2','bullet_3','bullet_4','bullet_5','product_description','generic_keyword','material','fabric_type','color','size','capacity','capacity_unit','model_number','model_name','handling_time','country_of_origin','price','currency','template','amazon_template','status','source','generated_at','edited_at','updated_by','review_notes','notes','shipping_fee','product_price','attrs_json','row_id'];
     private const H_VARIANTS = ['row_id','parent_row_id','id','marketplace','sku','parent_sku','variation_theme','variant_value','variant_code','variant_color','variant_size','design_code','main_image','other_images','price','product_price','shipping_fee','quantity','pkg_length','pkg_width','pkg_height','pkg_weight','status','source','generated_at','edited_at','notes'];
     private const H_DESIGNS = ['design_code','product_id','design_key','version','parent_code','source','adjust','cn_name','en_name','design_zh_name','design_zh_tags','design_en_name','design_en_tags','design_pattern','design_template','gallery_codes','effect_image_count','main_image','other_images','status','notes','created_at','updated_at'];
+    private const H_PRODUCT_VARIANTS = ['product_code','external_variant_id','color','size','spec_json','weight_g','size_l_cm','size_w_cm','size_h_cm','pkg_l_cm','pkg_w_cm','pkg_h_cm','volume_cm3','status','updated_at'];
+    private const H_PRODUCT_SHIPPING = ['product_code','external_variant_id','country','amount','currency','channel','updated_at'];
 
     private function pullCsvOne(string $dataset, ?string $since, ?string $mp)
     {
@@ -651,6 +730,35 @@ class SyncController extends Controller
 
                 return $this->csvResponse('designs.csv', self::H_DESIGNS, $rows);
 
+            case 'product_variants':
+                $q = ProductVariant::query(); if ($since) { $q->where('updated_at', '>=', $since); }
+                $rows = $q->get()->map(fn ($v) => [
+                    'product_code' => $codeOf[$v->product_id] ?? null,
+                    'external_variant_id' => $v->external_variant_id,
+                    'color' => $v->color, 'size' => $v->size,
+                    'spec_json' => $v->spec_json ? (is_string($v->spec_json) ? $v->spec_json : json_encode($v->spec_json, JSON_UNESCAPED_UNICODE)) : '',
+                    'weight_g' => $v->weight_g,
+                    'size_l_cm' => $v->size_l_cm, 'size_w_cm' => $v->size_w_cm, 'size_h_cm' => $v->size_h_cm,
+                    'pkg_l_cm' => $v->pkg_l_cm, 'pkg_w_cm' => $v->pkg_w_cm, 'pkg_h_cm' => $v->pkg_h_cm,
+                    'volume_cm3' => $v->volume_cm3, 'status' => $v->status,
+                    'updated_at' => $v->updated_at,
+                ])->all();
+
+                return $this->csvResponse('product_variants.csv', self::H_PRODUCT_VARIANTS, $rows);
+
+            case 'product_shipping':
+                $q = ProductShipping::query(); if ($since) { $q->where('updated_at', '>=', $since); }
+                $extOf = ProductVariant::pluck('external_variant_id', 'id');
+                $rows = $q->get()->map(fn ($s) => [
+                    'product_code' => $s->product_id ? ($codeOf[$s->product_id] ?? null) : null,
+                    'external_variant_id' => $s->product_variant_id ? ($extOf[$s->product_variant_id] ?? null) : null,
+                    'country' => $s->country, 'amount' => $s->amount,
+                    'currency' => $s->currency, 'channel' => $s->channel,
+                    'updated_at' => $s->updated_at,
+                ])->all();
+
+                return $this->csvResponse('product_shipping.csv', self::H_PRODUCT_SHIPPING, $rows);
+
             case 'manifest':
                 return response()->json(['ok' => true, 'data' => [
                     'generated_at' => now()->toIso8601String(),
@@ -658,7 +766,7 @@ class SyncController extends Controller
                 ]]);
 
             default:
-                return response()->json(['ok' => false, 'error' => ['code' => 'bad_dataset', 'message' => 'dataset ∈ products|listing_copy|listing_variants|designs|manifest']], 400);
+                return response()->json(['ok' => false, 'error' => ['code' => 'bad_dataset', 'message' => 'dataset ∈ products|listing_copy|listing_variants|designs|product_variants|product_shipping|manifest']], 400);
         }
     }
 

@@ -62,9 +62,12 @@ DELETE /tokens/{id}
   ],
   "product_variants": [
     { "product_code":"AXW1061", "external_variant_id":"F8P9P7",
-      "spec_json": {"color":"White","size":"One Size"}, "color":"White", "size":"One Size",
-      "cost_json": {"retail":8.9}, "weight_g": 68,
-      "shipping":[{ "country":"UK","amount":5.99,"channel":"云途普货专线" }] }
+      "spec_json": {"colorId":29,"sizeId":139,"code":"F8P9P7"}, "color":"29", "size":"139",
+      "weight_g": 112, "size_l_cm":14, "size_w_cm":14, "size_h_cm":2,
+      "pkg_l_cm":14, "pkg_w_cm":14, "pkg_h_cm":2, "volume_cm3":392, "status":"synced" }
+  ],
+  "variant_shipping": [
+    { "product_code":"AXW1061", "external_variant_id":"F8P9P7", "country":"US", "amount":30.39, "channel":"递四方服装专线" }
   ],
   "designs": [
     { "design_code":"FFGB3WL2","product_code":"AXW1061",
@@ -94,6 +97,9 @@ DELETE /tokens/{id}
   "data": {
     "products":  { "created": 2, "updated": 1, "skipped": 0 },
     "variants":  { "created": 3, "updated": 0, "skipped": 0 },
+    "product_variants": { "created": 6, "updated": 0, "skipped": 0 },
+    "product_shipping": { "created": 8, "updated": 0, "skipped": 0 },
+    "variant_shipping": { "created": 0, "updated": 48, "skipped": 0 },
     "designs":   { "created": 1, "updated": 0, "skipped": 0 },
     "listings":  { "created": 0, "updated": 4, "skipped": 1 },
     "assets":    { "referenced": 9, "missing_blobs": 0 },
@@ -112,7 +118,7 @@ DELETE /tokens/{id}
 ```
 GET /sync/pull?scope=products,listings,designs&marketplace=A1F83G8C2ARO7P&since=2026-09-19T00:00:00+08:00&format=json
 ```
-- `scope`：`products|variants|shipping|designs|listings|assets`（逗号多选）
+- `scope`：`products|variants|shipping|product_variants|product_shipping|designs|listings|assets`（逗号多选）
 - `since`：增量（省略=全量）；用返回的 `cursor` 做"接着拉"。
 - `format`：`json`（给 Agent）或 `csv`（给现成工具链，返回 zip）。
 
@@ -121,7 +127,8 @@ GET /sync/pull?scope=products,listings,designs&marketplace=A1F83G8C2ARO7P&since=
 { "ok": true, "data": {
   "cursor": "2026-09-20T14:00:00+08:00",
   "products": [ { /* 同 push 的 product 结构 */ } ],
-  "product_variants": [ { "external_id":"11973", "spec_json":{...}, "shipping":[{...}] } ],
+  "product_variants": [ { "product_code":"10809", "external_variant_id":"ZSZ24B", "spec_json":{"colorId":29,"sizeId":139}, "weight_g":112, "size_l_cm":"14.00", "size_w_cm":"14.00", "size_h_cm":"2.00", "pkg_l_cm":"14.00", ... } ],
+  "product_shipping": [ { "product_code":"10809", "external_variant_id":"ZSZ24B", "country":"US", "amount":"30.39", "channel":"递四方服装专线" } ],
   "designs": [ { "design_code":"FFGB3WL2", "…": "…" } ],
   "listings": [ { "…":"…", "assets":[ { "role":"main", "public_url":"https://media.…/….jpg" } ] } ]
 } }
@@ -131,6 +138,9 @@ GET /sync/pull?scope=products,listings,designs&marketplace=A1F83G8C2ARO7P&since=
 //   products.csv          ← 列 = 现有 database/products.csv
 //   listing_copy.csv      ← 列 = 现有 database/listing_copy.csv
 //   listing_variants.csv  ← 列 = 现有 database/listing_variants.csv
+//   product_variants.csv  ← 指纹商品规格（product_code, external_variant_id, color, size, spec_json, weight_g, size_*_cm, pkg_*_cm, volume_cm3, status）
+//   product_shipping.csv  ← 运费（product_code, external_variant_id, country, amount, currency, channel）
+//   designs.csv           ← 列 = 现有 database/designs.csv
 //   assets.csv            ← sku,role,media_type,public_url（本地补图用）
 //   manifest.json         ← { generated_at, cursor, counts }
 ```
@@ -156,6 +166,31 @@ DELETE /products/{id}          # 软删
 GET    /products/{id}/variants
 GET    /products/{id}/shipping?country=
 ```
+
+### 3.1 ★ 删除（软删 · 2026-09-29）
+
+```
+DELETE /products/{code}[?force=true]                  # 整体删商品（级联软删从属；已上架须 force）
+DELETE /products/{code}/variants/{external_variant_id} # 删单个指纹规格（连带其运费）
+DELETE /products/{code}/shipping?country=US[&scope=product|variant|all]
+DELETE /designs/by-code/{design_code}                 # 仍被引用→仅解绑；否则删（孤儿）
+DELETE /listings/by-sku/{sku}                         # 删 listing + 其子体
+```
+
+- **软删**（`deleted_at`）；`blobs`/`assets`（内容寻址·共享）**永不删**
+- **Q3**：有已上架 listing 且无 `force` → **409** `has_published_listings`（带 `published_count`）
+- **Q5 权限**：`users.is_admin=1` 删任意；普通用户只删 `pushed_by` 含自己 email 的 → 否则 **403**
+- **幂等**：删不存在 → `{ok:true, data:{note:"not_found_idempotent"}}`
+
+```jsonc
+// DELETE /products/10809?force=true → 200
+{ "ok": true, "data": {
+  "code": "10809",
+  "soft_deleted": { "products":1, "product_suppliers":1, "product_variants":6, "product_shipping":56,
+                    "designs":3, "orphan_designs":1, "listings":19, "listing_variants":18 },
+  "untouched": { "blobs":"shared", "assets":"shared" }
+} }
+```
 ```jsonc
 // GET /products/{id}
 { "ok": true, "data": {
@@ -180,6 +215,7 @@ POST   /designs
 GET    /designs/{id}
 PATCH  /designs/{id}
 DELETE /designs/{id}
+DELETE /designs/by-code/{design_code}   # ★ 按 design_code 软删（2026-09-29）；仍被引用→仅解绑
 ```
 响应同 `designs` 表字段（design_code/design_key/version/parent_code/pattern/template/status…）。
 

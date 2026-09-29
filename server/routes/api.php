@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\Api\AssetController;
 use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\DeleteController;
 use App\Http\Controllers\Api\DesignController;
 use App\Http\Controllers\Api\ListingController;
 use App\Http\Controllers\Api\ProductController;
@@ -49,6 +50,13 @@ Route::prefix('v1')->group(function () {
         Route::post('listings/{id}/unpublish', [ListingController::class, 'unpublish']);
         Route::post('listings/{id}/normalize-images', [ListingController::class, 'normalizeImages']);
         Route::apiResource('listings', ListingController::class);
+
+        // ★ 删除（软删）2026-09-29：整体删商品 + 分部删子资源
+        Route::delete('products/{code}', [DeleteController::class, 'destroyProduct']);
+        Route::delete('products/{code}/variants/{external_variant_id}', [DeleteController::class, 'destroyVariant']);
+        Route::delete('products/{code}/shipping', [DeleteController::class, 'destroyShipping']);
+        Route::delete('designs/by-code/{design_code}', [DeleteController::class, 'destroyDesign']);
+        Route::delete('listings/by-sku/{sku}', [DeleteController::class, 'destroyListing']);
 
         // 资产域（OSS 图床）
         Route::post('assets/check', [AssetController::class, 'check']);

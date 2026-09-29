@@ -80,6 +80,7 @@ app/Domain/
 - **本地 pull（拉取即用）**：`GET /api/v1/sync/pull?since=&scope=&marketplace=` → **JSON**（给 Agent）或 **CSV 包**（给现成工具链，列=现有 `database/*.csv`）→ 本地落地即编辑、即发。
 - **人（Web）**：CRUD listings/products/designs、看资产、看版本历史、看"哪站上了哪些 SKU"。
 - **Agent**：Token 调同套 API（拉/推/查）；本地 CLI 封装成 `hub push` / `hub pull`。
+- **逐规格运费（2026-09-29）**：本地 `output/<id>/{product.json,shipping.json}` → `hub import` 组装 → `POST /sync/push` 顶层 `product_variants[]` + `variant_shipping[]` → 中台落 `product_variants`（指纹规格）/ `product_shipping`（变体级）；其他机器 `pull` 即用，**不必重算运费**。
 
 ---
 

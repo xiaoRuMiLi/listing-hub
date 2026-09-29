@@ -17,7 +17,35 @@
 | **变体 pkg_** | ❌ 表头都无此列 | ❌ 逐规格包装尺寸/重量丢失（本地已有） |
 | **逐规格运费明细** | ❌ 无（渠道/档位/分国） | ❌ |
 
----
+### A.1 ★ 商品规格层 + 逐规格运费（2026-09-29 落地）
+
+> 上文 B/C 解决的是「**上架子体**」层（`listing_variants` + `products` 商品级 8 国列）。
+> 但运费/包装的**物理来源**是**指纹商品规格**（颜色×尺寸），本地落在 `output/<id>/product.json` 与 `shipping.json`。
+> 本层单独存两表，**避免每台机器重复调商家接口算运费**（`shipping:backfill` 有频率限制）。
+
+**粒度关系（三层，不重复存）**：
+
+```
+指纹规格 (product_variants)  ← 物理真相：颜色×尺寸 + 包装/重量 + 逐国运费
+   │  通过「尺寸 → 尺寸规格 → 运费」倒查
+   ↓
+上架子体 (listing_variants)  ← 销售维度：FS/NS/PF 款式 × 尺寸；只存售价/设计码
+```
+
+**`product_variants`**（指纹规格）：
+- 幂等键 `(product_id, external_variant_id)`；`external_variant_id` = 指纹 `variantCode`（如 `ZSZ24B`）
+- 字段：`color`/`size`(尺寸 id)、`spec_json`、`weight_g`、`size_*_cm`、`pkg_*_cm`、`volume_cm3`
+- 源：`output/<id>/product.json` → `profile.variants[]`
+
+**`product_shipping`**（运费，两粒度并存）：
+- **商品级**（`product_id`，代表值）← `products.csv` 的 `shipping_*` → push `product_shipping[]`
+- **变体级**（`product_variant_id`，逐规格×逐国）← `output/<id>/shipping.json` 的 `byVariant[].countries` → push `variant_shipping[]`
+- 幂等键：`(product_variant_id, country)` / `(product_id, country)`
+
+> ★ **不新增本地数据结构**（用户口径）：逐规格运费本就在 `output/<id>/shipping.json`，直接推即可。
+> ★ `shipping:backfill` **按包装去重**：key = `长|宽|高|重量|数量|国家`；同包装不重复请求。
+>    实测：10000（90 规格 → 9 种包装）8 国 = 72 次调用（复用 648 次，省 90%）。
+> ★ **读运费优先 `profile_json`**；`products` 表独立 8 国列为 NULL 属正常（见 `DATABASE.md` §4）。
 
 ## B. 新表 `listing_variants`（对齐本地 CSV 27 列）
 
@@ -113,6 +141,10 @@
 | `POST /api/v1/sync/push` | `listings[]` 里混父子 | **新增顶层 `variants[]`** → 写 `listing_variants` 表；`listings[]` 仅父体（子体仍兼容收但转存新表） |
 | `GET /api/v1/sync/pull?scope=variants` | 无 | 返回 `variants` 数组（JSON） |
 | `GET /api/v1/sync/pull?format=csv&dataset=listing_variants` | 从 listings 临时拼装 | **直读新表**（列对齐本地 CSV，含 pkg_* + 逐规格价） |
+| `POST /api/v1/sync/push`（顶层 `product_variants[]`） | 无 | **新增** → 写 `product_variants`（指纹规格） |
+| `POST /api/v1/sync/push`（顶层 `variant_shipping[]`） | 无 | **新增** → 写 `product_shipping`（变体级） |
+| `GET /api/v1/sync/pull?scope=product_variants` / `product_shipping` | 无 | **新增** 两个 scope |
+| `GET /api/v1/sync/pull?format=csv&dataset=product_variants` / `product_shipping` | 无 | **新增** 两个 dataset |
 | `GET /api/v1/listings/{id}/children` | 按 `parent_sku` 查 listings | 改查 `listing_variants` 表 |
 | `POST /api/v1/listings/oss-images` | 只处理 listings | 补 variants 图 |
 
@@ -128,6 +160,8 @@
 1. `import`：把 `listing_variants.csv` 组装为顶层 **`variants[]`**（字段对齐 §B.1，含 `pkg_*`、`local_row_id=row_id`），不再塞进 `listings[]`。
 2. `pull`：新增 `scope=variants`；`pullcsv` 的 `listing_variants` dataset 直读新表。
 3. `ossify`：variants 图继续镜像 OSS（不变）。
+4. `import`（2026-09-29）：读 `output/<id>/product.json` + `shipping.json` → 顶层新增 **`product_variants[]`**（指纹规格）+ **`variant_shipping[]`**（逐规格×逐国）；新增 `--ids` 过滤（只推指定商品）。
+5. `pullcsv`（2026-09-29）：新增 `product_variants` / `product_shipping` 两个 dataset 合并拉回。
 
 ---
 
