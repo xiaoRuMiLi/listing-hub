@@ -106,21 +106,37 @@ DELETE /tokens/{id}
     "conflicts": [
       { "key": {"marketplace":"A1F83G8C2ARO7P","sku":"…"}, "your_revision": 2, "server_revision": 5,
         "hint": "服务端比你新，请先 GET /listings/{id} 合并后再推" }
-    ]
+    ],
+    "warnings": [
+      "[WARN] HHY-ZW-12669-… (CARRIER_BAG_CASE) attrs_json 为空：schema 模式上架将缺必填属性"
+    ],
+    "missing_blobs": 3,
+    "blobs_pending": [ "https://nimg5.hicustom.com/static/…jpg" ]
   }
 }
 ```
 - **媒体**：`assets` 里的对象**先经 OSS 直传**（见 §6），push 只传 `sha256` 引用；`missing_blobs>0` 表示有资产没传成。
+  ★ **R9（2026-09-30）**：push 时对 `designs` / `listings` / `variants` 的图 URL 做归一 —— 已是 OSS 则不动；
+  未 OSS 的计入 `blobs_pending`（最多 20 条）+ `missing_blobs` 计数；带 `sync_images` 或 `normalize_images` 时**立即镜像**。
 - **冲突**：某条带 `revision` 且 `< 服务端` → 进 `conflicts`，该条不写（其余照写）。
+- ★ **R4（2026-09-30）**：`warnings[]` 是**不拒写**的提醒（`attrs_json` 为空 / 缺该 PT 必填；
+  清单见 `server/config/hub-pt-required.php`，改完需 `config:cache`）。
+- ★ **R1（2026-09-30）**：父体 `listings` 可带 `local_row_id`（= 本地 `listing_copy.row_id`，跨端稳定键）；
+  子体 `variants[].local_row_id` / `parent_row_id` 语义同前，但**导出时 `parent_row_id` 以父体真实 `local_row_id` 校正**。
+- ★ **R2（2026-09-30）**：`variant_shipping[]` 写库时**冗余回填 `product_id`**，使变体级运费在各读路径都带 `product_code`。
 
 ### 2.2 `GET /sync/pull` —— 中台→本地（拉取即用）
 
 ```
-GET /sync/pull?scope=products,listings,designs&marketplace=A1F83G8C2ARO7P&since=2026-09-19T00:00:00+08:00&format=json
+GET /sync/pull?scope=products,listings,designs&marketplace=A1F83G8C2ARO7P&since=2026-09-19T00:00:00+08:00&format=json&limit=200&include_deleted=0
 ```
 - `scope`：`products|variants|shipping|product_variants|product_shipping|designs|listings|assets`（逗号多选）
 - `since`：增量（省略=全量）；用返回的 `cursor` 做"接着拉"。
 - `format`：`json`（给 Agent）或 `csv`（给现成工具链，返回 zip）。
+- ★ **R8**：`limit`（每个数据集最多返回条数；`0`/省略=不限，**向后兼容**）。
+- ★ **R10**：`include_deleted=1` 连**软删**行一起返回（默认不返回；`products`/`designs`/`listings`/`variants` 生效）。
+- ★ **R1**：`listing_copy` 导出的 `row_id` = 父体**本地** `row_id`（无则回退中台 id）；`listing_variants` 的 `parent_row_id` 亦以父体本地 `row_id` 为准。
+- ★ **R3b**：`listing_variants` 的 `pkg_*` 为空时，导出会**由 `product_variants` 规格层 derive**（不落库）。
 
 ```jsonc
 // format=json
@@ -166,6 +182,13 @@ DELETE /products/{id}          # 软删
 GET    /products/{id}/variants
 GET    /products/{id}/shipping?country=
 ```
+
+> ★ **R11（2026-09-30）· `?force=true` 真删（hard delete）**：`DELETE /designs/by-code/{code}`、
+> `DELETE /listings/by-sku/{sku}`、`DELETE /products/{code}/variants/{ext}`、`DELETE /products/{code}/shipping`
+> 传 `?force=true` → **物理删除**（区别于默认软删）。
+> design 仍被活 listing 引用时，默认仅**解绑**；`?force=true` 则**解绑 + 真删**。
+> 注意：商品级 `DELETE /products/{code}?force=true` 的语义是「允许连带删已上架 listing」（**不是** hard delete）。
+> `blobs / assets` 永不删。
 
 ### 3.1 ★ 删除（软删 · 2026-09-29）
 

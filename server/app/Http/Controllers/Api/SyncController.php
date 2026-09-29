@@ -33,8 +33,11 @@ class SyncController extends Controller
 
         $stats = ['products' => $this->counts(), 'designs' => $this->counts(), 'listings' => $this->counts(), 'variants' => $this->counts(), 'product_shipping' => $this->counts(), 'product_variants' => $this->counts(), 'variant_shipping' => $this->counts()];
         $conflicts = [];
+        $warnings = [];   // ★ R4：不拒写的告警（如 attrs_json 空 / 缺该 PT 必填）
+        $pendingBlobs = [];   // ★ R9：未 OSS 化的图 URL（回执，最多留 20 条）
+        $doMirror = ! empty($payload['sync_images']) || ! empty($payload['normalize_images']);   // ★ R9
 
-        DB::transaction(function () use ($r, $payload, &$stats, &$conflicts) {
+        DB::transaction(function () use ($r, $payload, &$stats, &$conflicts, &$warnings, &$pendingBlobs, $doMirror) {
             // ① 商品
             foreach (($payload['products'] ?? []) as $p) {
                 $code = (string) ($p['code'] ?? '');
@@ -86,6 +89,18 @@ class SyncController extends Controller
                         ['external_id' => (string) ($src['external_id'] ?? $code), 'supplier_sku' => $src['supplier_sku'] ?? null, 'is_primary' => (bool) ($src['is_primary'] ?? true)],
                     );
                 }
+
+                // ★ R5：品类映射（推送侧带 categories[]；缺则从 listings 的 PT 推导——见 ProductController::show）
+                foreach (($p['categories'] ?? []) as $cat) {
+                    $catCode = (string) ($cat['code'] ?? '');
+                    if ($catCode === '') { continue; }
+                    $prod = Product::where('code', $code)->first();
+                    $c = \App\Domain\Catalog\Models\Category::firstOrCreate(
+                        ['platform' => $cat['platform'] ?? 'amazon', 'code' => $catCode],
+                        ['name_en' => $cat['name_en'] ?? null, 'name_cn' => $cat['name_cn'] ?? null],
+                    );
+                    $prod->categories()->syncWithoutDetaching([$c->id => ['platform' => $cat['platform'] ?? 'amazon', 'is_primary' => (bool) ($cat['is_primary'] ?? true)]]);
+                }
             }
 
             // ② 设计
@@ -106,14 +121,15 @@ class SyncController extends Controller
                     'template' => $d['template'] ?? null,
                     'gallery_codes' => $d['gallery_codes'] ?? null,
                     'effect_count' => $d['effect_count'] ?? null,
-                    'main_image' => $d['main_image'] ?? null,
-                    'other_images' => $d['other_images'] ?? null,
                     // R4：adjust_json 列早已存在（建表即有）—— 之前 push 漏写，此处补上
                     'adjust_json' => $d['adjust_json'] ?? null,
                     'design_zh_name' => $d['design_zh_name'] ?? null,
                     'design_zh_tags' => $d['design_zh_tags'] ?? null,
                     'design_en_name' => $d['design_en_name'] ?? null,
                     'design_en_tags' => $d['design_en_tags'] ?? null,
+                    // ★ R9：图 URL 归一（已是 OSS 则不动；否则计数回执，sync_images/normalize_images 时立即镜像）
+                    'main_image' => $this->ossUrl((string) ($d['main_image'] ?? ''), $doMirror, $pendingBlobs),
+                    'other_images' => $this->ossUrls((string) ($d['other_images'] ?? ''), $doMirror, $pendingBlobs),
                     'pushed_by' => $this->pushedBy($r, $payload),
                     'status' => $this->safeEnum($d['status'] ?? null, ['draft', 'active', 'superseded', 'archived'], 'active'),
                 ];
@@ -139,6 +155,7 @@ class SyncController extends Controller
             // ②b2 ★ 商品规格（product_variants）—— 指纹规格（颜色×尺寸），运费/包装的物理来源。
             //      幂等键：(product_id, external_variant_id=指纹 variantCode)。
             $variantIdMap = [];   // [product_code][external_variant_id] => product_variant_id
+            $variantIdMapProduct = [];   // [product_code][external_variant_id] => product_id
             foreach (($payload['product_variants'] ?? []) as $pv) {
                 $prod = Product::where('code', (string) ($pv['product_code'] ?? ''))->first();
                 $ext = (string) ($pv['external_variant_id'] ?? '');
@@ -147,7 +164,9 @@ class SyncController extends Controller
                     ['product_id' => $prod->id, 'external_variant_id' => $ext],
                     [
                         'color' => $pv['color'] ?? null,
+                        'color_name' => $pv['color_name'] ?? null,   // ★ R3b：规格颜色名（子体 pkg 兜底 derive 用）
                         'size' => $pv['size'] ?? ($pv['size_id'] ?? null),
+                        'size_name' => $pv['size_name'] ?? null,     // ★ R3b：规格尺寸名
                         'spec_json' => $pv['spec_json'] ?? null,
                         'weight_g' => $pv['weight_g'] ?? null,
                         'size_l_cm' => $pv['size_l_cm'] ?? null,
@@ -161,6 +180,7 @@ class SyncController extends Controller
                     ],
                 );
                 $variantIdMap[(string) $pv['product_code']][$ext] = $row->id;
+                $variantIdMapProduct[(string) $pv['product_code']][$ext] = $row->product_id;   // ★ R2：供 variant_shipping 冗余回填 product_id
                 $stats['product_variants']['updated']++;
             }
 
@@ -174,7 +194,14 @@ class SyncController extends Controller
                 if (! $vid) { continue; }
                 ProductShipping::updateOrCreate(
                     ['product_variant_id' => $vid, 'country' => $country],
-                    ['amount' => $vs['amount'] ?? null, 'currency' => $vs['currency'] ?? null, 'channel' => $vs['channel'] ?? null, 'updated_at' => now()],
+                    [
+                        // ★ R2：冗余回填 product_id（否则变体级运费导出时 product_code 为空 → “无归属”行）
+                        'product_id' => $variantIdMapProduct[$pc][$ext] ?? optional(ProductVariant::find($vid))->product_id,
+                        'amount' => $vs['amount'] ?? null,
+                        'currency' => $vs['currency'] ?? null,
+                        'channel' => $vs['channel'] ?? null,
+                        'updated_at' => now(),
+                    ],
                 );
                 $stats['variant_shipping']['updated']++;
             }
@@ -192,7 +219,7 @@ class SyncController extends Controller
                 ));
             }
             foreach ($variantRows as $v) {
-                $this->upsertVariant($r, $payload, $v, $stats);
+                $this->upsertVariant($r, $payload, $v, $stats, $pendingBlobs, $doMirror);
             }
 
             // ③ 上架
@@ -218,6 +245,8 @@ class SyncController extends Controller
                     if ($design->main_image) { $imgs[] = trim($design->main_image); }
                     foreach (array_filter(array_map('trim', explode('|', (string) $design->other_images))) as $u) { $imgs[] = $u; }
                 }
+                // ★ R9：图 URL 归一（已是 OSS 则不动；未 OSS → 计数回执，sync_images/normalize_images 时立即镜像）
+                foreach ($imgs as $i => $u) { $imgs[$i] = $this->ossUrl((string) $u, $doMirror, $pendingBlobs); }
 
                 $existing = Listing::where('account_id', $acc->id)->where('marketplace', $mp)->where('sku', $sku)->first();
 
@@ -231,6 +260,8 @@ class SyncController extends Controller
                     'parent_sku' => $l['parent_sku'] ?? null,
                     'is_parent' => array_key_exists('is_parent', $l) ? (bool) $l['is_parent'] : empty($l['parent_sku']),
                     'parent_row_id' => $l['parent_row_id'] ?? null,
+                    // ★ R1：父体本地 row_id（跨端稳定键；导出 listing_copy.row_id 用）
+                    'local_row_id' => isset($l['local_row_id']) ? (int) $l['local_row_id'] : (isset($l['row_id']) ? (int) $l['row_id'] : null),
                     'variation_theme' => $l['variation_theme'] ?? null,
                     'variant_color' => $l['variant_color'] ?? null,
                     'variant_size' => $l['variant_size'] ?? null,
@@ -261,6 +292,33 @@ class SyncController extends Controller
                 if ($prod === null) { unset($row['product_id']); }
                 if ($design === null) { unset($row['design_id']); }
 
+                // ★ R4：不拒写的告警 —— attrs_json 为空 / 缺该 PT 必填
+                $pt = (string) ($row['amazon_product_type'] ?? '');
+                if ($pt !== '') {
+                    $attrs = is_array($row['attrs_json'] ?? null) ? $row['attrs_json'] : [];
+                    $need = array_values(array_unique(array_merge(
+                        (array) config('hub-pt-required._always', []),
+                        (array) config('hub-pt-required.' . $pt, []),
+                    )));
+                    if (empty($attrs)) {
+                        $warnings[] = '[WARN] ' . $sku . ' (' . $pt . ') attrs_json 为空：schema 模式上架将缺必填属性';
+                    } else {
+                        // ★ R12：key 归一化 —— 真源 attrs_json 是【路径格式】
+                        //   （如 `unit_count[marketplace_id=A1F83G8C2ARO7P]#1.value`），
+                        //   直接按裸属性名比对会误报“全缺”。取 `[`/`#`/`.` 之前的基名后小写比较。
+                        $have = [];
+                        foreach (array_keys($attrs) as $k) {
+                            $base = preg_split('/[\[#\.]/', (string) $k);
+                            $base = strtolower(trim((string) ($base[0] ?? '')));
+                            if ($base !== '') { $have[$base] = true; }
+                        }
+                        $missing = array_values(array_filter($need, fn ($k) => ! isset($have[strtolower(trim((string) $k))])));
+                        if ($missing) {
+                            $warnings[] = '[WARN] ' . $sku . ' (' . $pt . ') 缺 ' . count($missing) . ' 项必填: ' . implode(', ', array_slice($missing, 0, 8));
+                        }
+                    }
+                }
+
                 if ($existing) {
                     // 乐观锁：带 revision 且过期 → 冲突，不写
                     if (isset($l['revision']) && (int) $l['revision'] !== (int) $existing->revision) {
@@ -288,13 +346,19 @@ class SyncController extends Controller
 
         $job->update(['status' => 'done', 'stats_json' => $stats, 'finished_at' => now()]);
 
-        return ['ok' => true, 'data' => $stats + ['conflicts' => $conflicts]];
+        return ['ok' => true, 'data' => $stats + [
+            'conflicts' => $conflicts,
+            'warnings' => $warnings,
+            // ★ R9：未 OSS 化的图（下游可调 `/listings/oss-images` 分批镜像）
+            'missing_blobs' => count($pendingBlobs),
+            'blobs_pending' => array_slice($pendingBlobs, 0, 20),
+        ]];
     }
 
     /**
      * 写入一条变体子体（独立表）。幂等键：local_row_id 优先 → 回落 (account_id, marketplace, sku)。
      */
-    private function upsertVariant(Request $r, array $payload, array $v, array &$stats): void
+    private function upsertVariant(Request $r, array $payload, array $v, array &$stats, array &$pending = [], bool $doMirror = false): void
     {
         $sku = (string) ($v['sku'] ?? '');
         if ($sku === '') { return; }
@@ -324,12 +388,17 @@ class SyncController extends Controller
             $mainImg = $imgs[0] ?? $mainImg;
             $otherImg = (count($imgs) > 1) ? implode('|', array_slice($imgs, 1)) : $otherImg;
         }
+        // ★ R9：图 URL 归一 + 未 OSS 回执
+        $mainImg = ($this->ossUrl((string) ($mainImg ?? ''), $doMirror, $pending)) ?: null;
+        $otherImg = ($this->ossUrls((string) ($otherImg ?? ''), $doMirror, $pending)) ?: null;
 
         $localRowId = isset($v['local_row_id']) ? (int) $v['local_row_id'] : (isset($v['row_id']) ? (int) $v['row_id'] : null);
+        // ★ R1：父体本地 row_id 兜底（客户端没带 parent_row_id 时，用父体已存的 local_row_id）
+        $parentLocalRowId = isset($v['parent_row_id']) ? (int) $v['parent_row_id'] : ($parent?->local_row_id ? (int) $parent->local_row_id : null);
 
         $row = [
             'local_row_id' => $localRowId,
-            'parent_local_row_id' => isset($v['parent_row_id']) ? (int) $v['parent_row_id'] : null,
+            'parent_local_row_id' => $parentLocalRowId,
             'parent_listing_id' => $parent?->id,
             'parent_sku' => $v['parent_sku'] ?? null,
             'account_id' => $acc->id,
@@ -366,10 +435,11 @@ class SyncController extends Controller
             'pushed_by' => $this->pushedBy($r, $payload),
         ];
 
-        // 定位已有行：local_row_id 优先 → 回落业务键
+        // 定位已有行：跨端键 (account, marketplace, local_row_id) 优先 → 回落业务键 (account, marketplace, sku)
         $existing = null;
         if ($localRowId) {
-            $existing = ListingVariant::where('local_row_id', $localRowId)->first();
+            $existing = ListingVariant::where('account_id', $acc->id)
+                ->where('marketplace', $mp)->where('local_row_id', $localRowId)->first();
         }
         if (! $existing) {
             $existing = ListingVariant::where('account_id', $acc->id)
@@ -393,6 +463,8 @@ class SyncController extends Controller
         $scopes = array_filter(explode(',', (string) $r->query('scope', 'products,designs,listings')));
         $since = $r->query('since');
         $mp = $r->query('marketplace');
+        $limit = (int) $r->query('limit', 0);                 // ★ R8：每数据集限量（0=不限，向后兼容）
+        $inclDel = (bool) $r->query('include_deleted', false); // ★ R10：连软删行一起拉
         $cursor = now()->toIso8601String();
 
         if ($r->query('format') === 'csv') {
@@ -403,6 +475,7 @@ class SyncController extends Controller
 
         if (in_array('products', $scopes)) {
             $q = Product::query();
+            if ($inclDel) { $q->withTrashed(); }
             if ($since) { $q->where('updated_at', '>=', $since); }
             $out['products'] = $q->get()->map(fn ($p) => [
                 'code' => $p->code, 'spu_code' => $p->spu_code, 'is_custom' => $p->is_custom,
@@ -420,6 +493,7 @@ class SyncController extends Controller
         }
         if (in_array('designs', $scopes)) {
             $q = Design::query();
+            if ($inclDel) { $q->withTrashed(); }
             if ($since) { $q->where('updated_at', '>=', $since); }
             $out['designs'] = $q->get()->map(fn ($d) => [
                 'design_code' => $d->design_code, 'design_key' => $d->design_key, 'version' => $d->version,
@@ -438,6 +512,7 @@ class SyncController extends Controller
         }
         if (in_array('listings', $scopes)) {
             $q = Listing::query();
+            if ($inclDel) { $q->withTrashed(); }
             if ($since) { $q->where('updated_at', '>=', $since); }
             if ($mp) { $q->where('marketplace', strtoupper($mp)); }
             $out['listings'] = $q->get()->map(fn ($l) => [
@@ -454,6 +529,9 @@ class SyncController extends Controller
                 'attrs_json' => $l->attrs_json,
                 'design_code' => $l->design_code, 'product_code' => $l->product_code,
                 'parent_row_id' => $l->parent_row_id,
+                // ★ R1：父体本地 row_id（跨端稳定键）+ 导出用 row_id
+                'local_row_id' => $l->local_row_id,
+                'row_id' => $l->local_row_id ?? $l->id,
                 'copy_json' => $l->copy_json, 'variant_json' => $l->variant_json,
                 // ★ 上架/下架状态（异地/ERP 拉回即可知是否已上架）
                 'is_complete' => $l->is_complete, 'missing_fields' => $l->missing_fields,
@@ -469,11 +547,16 @@ class SyncController extends Controller
         // ★ 变体子体（独立表）
         if (in_array('variants', $scopes)) {
             $q = ListingVariant::query();
+            if ($inclDel) { $q->withTrashed(); }
             if ($since) { $q->where('updated_at', '>=', $since); }
             if ($mp) { $q->where('marketplace', strtoupper($mp)); }
-            $out['variants'] = $q->get()->map(fn ($v) => [
+            $parentLocalOf = Listing::whereNotNull('local_row_id')->pluck('local_row_id', 'id');   // ★ R1：listing.id → 父体本地 row_id
+            $out['variants'] = $q->get()->map(function ($v) use ($parentLocalOf) {
+                return [
                 'local_row_id' => $v->local_row_id,
                 'parent_local_row_id' => $v->parent_local_row_id,
+                // ★ R1：parent_row_id 以父体真实本地 row_id 为准（回退推送机旧值）
+                'parent_row_id' => $v->parent_listing_id ? ($parentLocalOf[$v->parent_listing_id] ?? $v->parent_local_row_id) : $v->parent_local_row_id,
                 'parent_listing_id' => $v->parent_listing_id,
                 'parent_sku' => $v->parent_sku,
                 'marketplace' => $v->marketplace,
@@ -493,7 +576,8 @@ class SyncController extends Controller
                 'generated_at' => $v->generated_at, 'edited_at' => $v->edited_at, 'notes' => $v->notes,
                 'pushed_by' => $v->pushed_by,
                 'updated_at' => $v->updated_at,
-            ])->values();
+                ];
+            })->values();
         }
 
         // ★ 商品规格（指纹规格：颜色×尺寸 + 包装/重量）
@@ -504,6 +588,8 @@ class SyncController extends Controller
             $out['product_variants'] = $q->get()->map(fn ($v) => [
                 'product_code' => $codeOf[$v->product_id] ?? null,
                 'external_variant_id' => $v->external_variant_id,
+                // ★ R3b：规格名（尺寸/颜色）——子体 pkg 兜底 derive 的匹配键
+                'size_name' => $v->size_name, 'color_name' => $v->color_name,
                 'color' => $v->color, 'size' => $v->size,
                 'spec_json' => $v->spec_json,
                 'weight_g' => $v->weight_g,
@@ -520,13 +606,24 @@ class SyncController extends Controller
             if ($since) { $q->where('updated_at', '>=', $since); }
             $codeOf = Product::pluck('code', 'id');
             $extOf = ProductVariant::pluck('external_variant_id', 'id');
+            $pvProductOf = ProductVariant::pluck('product_id', 'id');   // ★ R2：product_variant_id → product_id
             $out['product_shipping'] = $q->get()->map(fn ($s) => [
-                'product_code' => $s->product_id ? ($codeOf[$s->product_id] ?? null) : null,
+                // ★ R2：变体级行 product_id 为空 → 经 product_variant_id 反查 product_code
+                'product_code' => $s->product_id
+                    ? ($codeOf[$s->product_id] ?? null)
+                    : ($s->product_variant_id ? ($codeOf[$pvProductOf[$s->product_variant_id] ?? 0] ?? null) : null),
                 'external_variant_id' => $s->product_variant_id ? ($extOf[$s->product_variant_id] ?? null) : null,
                 'country' => $s->country, 'amount' => $s->amount,
                 'currency' => $s->currency, 'channel' => $s->channel,
                 'updated_at' => $s->updated_at,
             ])->values();
+        }
+
+        // ★ R8：每数据集限量（默认 0=不限，向后兼容）
+        if ($limit > 0) {
+            foreach (['products', 'designs', 'listings', 'variants', 'product_variants', 'product_shipping'] as $k) {
+                if (isset($out[$k]) && $out[$k] instanceof \Illuminate\Support\Collection) { $out[$k] = $out[$k]->take($limit)->values(); }
+            }
         }
 
         return ['ok' => true, 'data' => $out];
@@ -580,7 +677,7 @@ class SyncController extends Controller
 
     // ============ CSV 包导出（列对齐现有 database/*.csv，落地即用） ============
 
-    private const H_PRODUCTS = ['id','spu_code','cn_name','en_name','alias','factory','material','material_en','technology','release_time','is_custom','default_color_id','default_color_name','default_size_id','default_size_name','variant_id','variant_code','variants_count','colors','sizes','size_L_cm','size_W_cm','size_H_cm','package_L_cm','package_W_cm','package_H_cm','volume_cm3','weight_g','design_face_w','design_face_h','design_face_count','min_price','qty_from','qty_to','retail_price','gold_price','platinum_price','diamond_price','black_diamond_price','star_diamond_price','shipping_US','shipping_UK','shipping_CA','shipping_DE','shipping_MX','shipping_FR','shipping_ES','shipping_IT','shipping_channel_US','shipping_channel_UK','shipping_channel_CA','shipping_channel_DE','shipping_channel_MX','shipping_channel_FR','shipping_channel_ES','shipping_channel_IT','freight_template_US','freight_template_UK','freight_template_CA','freight_template_DE','freight_template_MX','freight_template_FR','freight_template_ES','freight_template_IT','shipping_updated_at','price_US','price_UK','price_CA','price_DE','price_MX','price_FR','price_ES','price_IT','price_currency','rate_note','status','notes','created_at','updated_at'];
+    private const H_PRODUCTS = ['id','spu_code','cn_name','en_name','alias','factory','material','material_en','technology','release_time','is_custom','default_color_id','default_color_name','default_size_id','default_size_name','variant_id','variant_code','variants_count','colors','sizes','size_L_cm','size_W_cm','size_H_cm','package_L_cm','package_W_cm','package_H_cm','volume_cm3','weight_g','design_face_w','design_face_h','design_face_count','min_price','qty_from','qty_to','retail_price','gold_price','platinum_price','diamond_price','black_diamond_price','star_diamond_price','shipping_US','shipping_UK','shipping_CA','shipping_DE','shipping_MX','shipping_FR','shipping_ES','shipping_IT','shipping_channel_US','shipping_channel_UK','shipping_channel_CA','shipping_channel_DE','shipping_channel_MX','shipping_channel_FR','shipping_channel_ES','shipping_channel_IT','freight_template_US','freight_template_UK','freight_template_CA','freight_template_DE','freight_template_MX','freight_template_FR','freight_template_ES','freight_template_IT','shipping_updated_at','shipping_variant','price_US','price_UK','price_CA','price_DE','price_MX','price_FR','price_ES','price_IT','price_currency','rate_note','status','notes','created_at','updated_at'];
     private const H_LISTING_COPY = ['id','design_code','marketplace','product_type','sku','item_name','highlight','bullet_1','bullet_2','bullet_3','bullet_4','bullet_5','product_description','generic_keyword','material','fabric_type','color','size','capacity','capacity_unit','model_number','model_name','handling_time','country_of_origin','price','currency','template','amazon_template','status','source','generated_at','edited_at','updated_by','review_notes','notes','shipping_fee','product_price','attrs_json','row_id'];
     private const H_VARIANTS = ['row_id','parent_row_id','id','marketplace','sku','parent_sku','variation_theme','variant_value','variant_code','variant_color','variant_size','design_code','main_image','other_images','price','product_price','shipping_fee','quantity','pkg_length','pkg_width','pkg_height','pkg_weight','status','source','generated_at','edited_at','notes'];
     private const H_DESIGNS = ['design_code','product_id','design_key','version','parent_code','source','adjust','cn_name','en_name','design_zh_name','design_zh_tags','design_en_name','design_en_tags','design_pattern','design_template','gallery_codes','effect_image_count','main_image','other_images','status','notes','created_at','updated_at'];
@@ -634,6 +731,7 @@ class SyncController extends Controller
                         'freight_template_MX' => $g('freight_template_MX'), 'freight_template_FR' => $g('freight_template_FR'),
                         'freight_template_ES' => $g('freight_template_ES'), 'freight_template_IT' => $g('freight_template_IT'),
                         'shipping_updated_at' => $p->shipping_updated_at ?? $g('shipping_updated_at'),
+                        'shipping_variant' => $p->shipping_variant ?? $g('shipping_variant'),   // ★ R7：变体级运费标记（此前导出丢失）
                         'shipping_variant' => $p->shipping_variant ?? $g('shipping_variant'),
                         'price_US' => $p->price_US ?? $g('price_US'), 'price_UK' => $p->price_UK ?? $g('price_UK'),
                         'price_CA' => $p->price_CA ?? $g('price_CA'), 'price_DE' => $p->price_DE ?? $g('price_DE'),
@@ -676,7 +774,8 @@ class SyncController extends Controller
                         'price' => $l->price, 'currency' => $l->currency, 'status' => $l->status,
                         'shipping_fee' => $l->shipping_fee, 'product_price' => $l->product_price,
                         'attrs_json' => $l->attrs_json ? json_encode($l->attrs_json, JSON_UNESCAPED_UNICODE) : '',
-                        'row_id' => $l->id, 'edited_at' => $l->updated_at,
+                        'row_id' => $l->local_row_id ?? $l->id,   // ★ R1：优先父体本地 row_id（回退中台 id）
+                        'edited_at' => ($c('edited_at') !== '' ? $c('edited_at') : $l->updated_at),   // ★ R6：优先真实 edited_at
                     ];
                 })->all();
 
@@ -684,11 +783,18 @@ class SyncController extends Controller
 
             case 'listing_variants':
                 $q = ListingVariant::query(); if ($since) { $q->where('updated_at', '>=', $since); } if ($mp) { $q->where('marketplace', strtoupper($mp)); }
-                $rows = $q->get()->map(function ($l) use ($codeOf, $designCode) {
+                $parentLocalOf = Listing::whereNotNull('local_row_id')->pluck('local_row_id', 'id');        // ★ R1
+                $pvByProductCode = $this->specsByProductCode();                                            // ★ R3b
+                $rows = $q->get()->map(function ($l) use ($codeOf, $designCode, $parentLocalOf, $pvByProductCode) {
                     // 列对齐本地 listing_variants.csv（含 pkg_* + 逐规格价）
+                    $pkg = [$l->pkg_length, $l->pkg_width, $l->pkg_height, $l->pkg_weight];
+                    if ($pkg[0] === null && $pkg[1] === null && $pkg[2] === null && $pkg[3] === null) {
+                        $pkg = $this->deriveVariantPkg($l, $pvByProductCode);   // ★ R3b 兜底：由规格层 derive
+                    }
+
                     return [
                         'row_id' => $l->local_row_id,
-                        'parent_row_id' => $l->parent_local_row_id,
+                        'parent_row_id' => $l->parent_listing_id ? ($parentLocalOf[$l->parent_listing_id] ?? $l->parent_local_row_id) : $l->parent_local_row_id,   // ★ R1
                         'id' => $l->product_code ?: ($codeOf[$l->product_id] ?? null),
                         'marketplace' => $l->marketplace,
                         'sku' => $l->sku, 'parent_sku' => $l->parent_sku, 'variation_theme' => $l->variation_theme,
@@ -699,8 +805,8 @@ class SyncController extends Controller
                         'main_image' => $l->main_image, 'other_images' => $l->other_images,
                         'price' => $l->price, 'product_price' => $l->product_price, 'shipping_fee' => $l->shipping_fee,
                         'quantity' => $l->quantity,
-                        'pkg_length' => $l->pkg_length, 'pkg_width' => $l->pkg_width,
-                        'pkg_height' => $l->pkg_height, 'pkg_weight' => $l->pkg_weight,
+                        'pkg_length' => $pkg[0], 'pkg_width' => $pkg[1],
+                        'pkg_height' => $pkg[2], 'pkg_weight' => $pkg[3],
                         'status' => $l->status,
                         'source' => $l->source, 'generated_at' => $l->generated_at,
                         'edited_at' => $l->edited_at ?: $l->updated_at, 'notes' => $l->notes,
@@ -749,8 +855,12 @@ class SyncController extends Controller
             case 'product_shipping':
                 $q = ProductShipping::query(); if ($since) { $q->where('updated_at', '>=', $since); }
                 $extOf = ProductVariant::pluck('external_variant_id', 'id');
+                $pvProductOf = ProductVariant::pluck('product_id', 'id');   // ★ R2
                 $rows = $q->get()->map(fn ($s) => [
-                    'product_code' => $s->product_id ? ($codeOf[$s->product_id] ?? null) : null,
+                    // ★ R2：变体级行 product_id 为空 → 经 product_variant_id 反查 product_code
+                    'product_code' => $s->product_id
+                        ? ($codeOf[$s->product_id] ?? null)
+                        : ($s->product_variant_id ? ($codeOf[$pvProductOf[$s->product_variant_id] ?? 0] ?? null) : null),
                     'external_variant_id' => $s->product_variant_id ? ($extOf[$s->product_variant_id] ?? null) : null,
                     'country' => $s->country, 'amount' => $s->amount,
                     'currency' => $s->currency, 'channel' => $s->channel,
@@ -796,11 +906,82 @@ class SyncController extends Controller
         return $s;
     }
 
+    /** ★ R9：单图 URL 归一（已是 OSS 则原样返回；未 OSS → 计数回执，doMirror 时立即镜像） */
+    private function ossUrl(string $u, bool $doMirror, array &$pending): string
+    {
+        $u = trim($u);
+        if ($u === '' || ! preg_match('#^https?://#i', $u)) { return $u; }
+        if (preg_match('#oss-cn-|aliyuncs\.com#i', $u)) { return $u; }
+        if ($doMirror) {
+            try {
+                $res = app(\App\Domain\Asset\Services\MediaService::class)->mirror($u);
+                if (! empty($res['blob']->public_url)) { return $res['blob']->public_url; }
+            } catch (\Throwable $e) { /* 落回：计数 + 原样 */ }
+        }
+        if (count($pending) < 20) { $pending[] = $u; }
+
+        return $u;
+    }
+
+    /** ★ R9：多图（`|` 分隔）归一 */
+    private function ossUrls(string $urls, bool $doMirror, array &$pending): string
+    {
+        $list = array_values(array_filter(array_map('trim', explode('|', $urls))));
+        $out = [];
+        foreach ($list as $u) { $out[] = $this->ossUrl($u, $doMirror, $pending); }
+
+        return implode('|', $out);
+    }
+
     /** 把外部状态映射到本系统合法枚举，未知→默认（避免 MySQL Data truncated） */
     private function safeEnum(?string $val, array $allowed, string $default): string
     {
         $v = strtolower(trim((string) $val));
 
         return in_array($v, $allowed, true) ? $v : $default;
+    }
+
+    /** ★ R3b：规格层按 product_code 分组（供子体 pkg 兜底 derive） */
+    private function specsByProductCode(): array
+    {
+        $codeOf = Product::pluck('code', 'id');
+        $out = [];
+        foreach (ProductVariant::all() as $v) {
+            $code = (string) ($codeOf[$v->product_id] ?? '');
+            if ($code === '') { continue; }
+            $out[$code][] = [
+                'size_name' => $v->size_name, 'color_name' => $v->color_name,
+                'pkg_l_cm' => $v->pkg_l_cm ?? $v->size_l_cm,
+                'pkg_w_cm' => $v->pkg_w_cm ?? $v->size_w_cm,
+                'pkg_h_cm' => $v->pkg_h_cm ?? $v->size_h_cm,
+                'weight_g' => $v->weight_g,
+            ];
+        }
+
+        return $out;
+    }
+
+    /**
+     * ★ R3b：子体自身 pkg_* 为空时，由规格层 derive（拉取即用的阅读路径兜底；不落库）。
+     * 匹配：variant_size ↔ product_variants.size_name（归一化后相等，颜色也相等则优先）；
+     *       单规格商品直接取唯一规格。
+     */
+    private function deriveVariantPkg($v, array $pvByProductCode): array
+    {
+        $specs = $pvByProductCode[(string) ($v->product_code ?? '')] ?? [];
+        if (! $specs) { return [null, null, null, null]; }
+        $norm = fn ($s) => preg_replace('/[^a-z0-9]/', '', strtolower((string) $s));
+        $wantSize = $norm($v->variant_size);
+        $wantColor = $norm($v->variant_color);
+        $hit = null;
+        foreach ($specs as $s) {
+            $sName = $norm($s['size_name'] ?? '');
+            $cName = $norm($s['color_name'] ?? '');
+            if ($wantSize !== '' && $sName !== '' && $sName === $wantSize && ($wantColor === '' || $cName === '' || $cName === $wantColor)) { $hit = $s; break; }
+        }
+        if ($hit === null && count($specs) === 1) { $hit = $specs[0]; }
+        if ($hit === null) { return [null, null, null, null]; }
+
+        return [$hit['pkg_l_cm'], $hit['pkg_w_cm'], $hit['pkg_h_cm'], $hit['weight_g']];
     }
 }

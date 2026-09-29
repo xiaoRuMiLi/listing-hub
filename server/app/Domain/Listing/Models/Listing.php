@@ -26,6 +26,8 @@ class Listing extends Model
         'copy_json' => 'array',
         'variant_json' => 'array',
         'parent_row_id' => 'integer',
+        // ★ R1：父体本地 row_id（跨端稳定键），供 listing_copy.csv 导出还原真实 row_id
+        'local_row_id' => 'integer',
         'first_published_at' => 'datetime',
         'published_at' => 'datetime',
     ];

@@ -40,7 +40,17 @@ class ProductController extends Controller
     {
         $p = Product::with(['sources.supplier', 'categories', 'variants.shipping', 'designs', 'shipping'])->findOrFail($id);
 
-        return ['ok' => true, 'data' => $p];
+        $data = $p->toArray();
+
+        // ★ R5：categories 为空时，从该商品 listings 的 amazon_product_type 推导（只读派生，不落库）
+        if (empty($data['categories'])) {
+            $pts = \App\Domain\Listing\Models\Listing::where('product_id', $p->id)
+                ->whereNotNull('amazon_product_type')
+                ->pluck('amazon_product_type')->unique()->values();
+            $data['categories_derived'] = $pts->map(fn ($c) => ['platform' => 'amazon', 'code' => $c, 'is_primary' => true])->all();
+        }
+
+        return ['ok' => true, 'data' => $data];
     }
 
     public function store(Request $r)
