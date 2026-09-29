@@ -9,6 +9,7 @@ use App\Domain\Catalog\Models\Supplier;
 use App\Domain\Design\Models\Design;
 use App\Domain\Identity\Models\Account;
 use App\Domain\Listing\Models\Listing;
+use App\Domain\Listing\Models\ListingVariant;
 use App\Domain\Sync\Models\SyncJob;
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
@@ -29,7 +30,7 @@ class SyncController extends Controller
             'status' => 'running', 'started_at' => now(),
         ]);
 
-        $stats = ['products' => $this->counts(), 'designs' => $this->counts(), 'listings' => $this->counts(), 'product_shipping' => $this->counts()];
+        $stats = ['products' => $this->counts(), 'designs' => $this->counts(), 'listings' => $this->counts(), 'variants' => $this->counts(), 'product_shipping' => $this->counts()];
         $conflicts = [];
 
         DB::transaction(function () use ($r, $payload, &$stats, &$conflicts) {
@@ -59,6 +60,17 @@ class SyncController extends Controller
                     'detail_json' => $p['detail_json'] ?? null,
                     // R3：长尾字段桶（8国运费/售价组 + 尺寸/包装 + 默认值 + 批发档价 + 其他）
                     'profile_json' => $p['profile_json'] ?? null,
+                    // ★ 商品级 8 国物流/售价（提升为物理列；中台此前只在 profile_json 桶）
+                    'shipping_US' => $p['shipping_US'] ?? null,
+                    'shipping_UK' => $p['shipping_UK'] ?? null,
+                    'shipping_CA' => $p['shipping_CA'] ?? null,
+                    'shipping_DE' => $p['shipping_DE'] ?? null,
+                    'shipping_MX' => $p['shipping_MX'] ?? null,
+                    'shipping_FR' => $p['shipping_FR'] ?? null,
+                    'shipping_ES' => $p['shipping_ES'] ?? null,
+                    'shipping_IT' => $p['shipping_IT'] ?? null,
+                    'shipping_variant' => $p['shipping_variant'] ?? null,
+                    'shipping_updated_at' => $p['shipping_updated_at'] ?? null,
                     'pushed_by' => $this->pushedBy($r, $payload),
                 ];
                 if ($existing) { $existing->update($attrs); $stats['products']['updated']++; }
@@ -121,6 +133,22 @@ class SyncController extends Controller
                     ['amount' => $s['amount'] ?? null, 'currency' => $s['currency'] ?? null, 'channel' => $s['channel'] ?? null, 'updated_at' => now()],
                 );
                 $stats['product_shipping']['updated']++;
+            }
+
+            // ②c ★ 变体子体（独立表 listing_variants）—— 优先吃顶层 variants[]；
+            //     兼容：老客户端仍把子体塞在 listings[] 里（is_parent=false），一并转存新表。
+            $variantRows = array_values(array_filter(
+                $payload['variants'] ?? [],
+                fn ($v) => ! empty($v['sku']),
+            ));
+            if (empty($variantRows)) {
+                $variantRows = array_values(array_filter(
+                    $payload['listings'] ?? [],
+                    fn ($l) => ! empty($l['sku']) && array_key_exists('is_parent', $l) && ! $l['is_parent'] && ! empty($l['parent_sku']),
+                ));
+            }
+            foreach ($variantRows as $v) {
+                $this->upsertVariant($r, $payload, $v, $stats);
             }
 
             // ③ 上架
@@ -219,6 +247,103 @@ class SyncController extends Controller
         return ['ok' => true, 'data' => $stats + ['conflicts' => $conflicts]];
     }
 
+    /**
+     * 写入一条变体子体（独立表）。幂等键：local_row_id 优先 → 回落 (account_id, marketplace, sku)。
+     */
+    private function upsertVariant(Request $r, array $payload, array $v, array &$stats): void
+    {
+        $sku = (string) ($v['sku'] ?? '');
+        if ($sku === '') { return; }
+        $mp = strtoupper((string) ($v['marketplace'] ?? 'A1F83G8C2ARO7P'));
+        $accName = (string) ($v['account'] ?? 'HHY');
+        $acc = Account::firstOrCreate(['name' => $accName], ['platform' => $v['platform'] ?? 'amazon', 'status' => 'active']);
+
+        // 父体 listing：优先按 parent_sku（同账号/站点）定位
+        $parent = null;
+        if (! empty($v['parent_sku'])) {
+            $parent = Listing::where('account_id', $acc->id)->where('marketplace', $mp)->where('sku', $v['parent_sku'])->first();
+        }
+        // 兜底：用父体的 local_row_id（= parent_row_id）反查 listing（listing.local_row_id 由 push 写入 attrs? 不——用 parent_sku 为主，parent_row_id 仅留存）
+        $prod = null;
+        if (! empty($v['product_code'])) {
+            $prod = Product::where('code', (string) $v['product_code'])->first();
+        } elseif ($parent && $parent->product_id) {
+            $prod = Product::find($parent->product_id);
+        }
+        $design = ! empty($v['design_code']) ? Design::where('design_code', $v['design_code'])->first() : null;
+
+        // 图片（显式 images 优先；否则沿用传入的 main/other）
+        $mainImg = $v['main_image'] ?? null;
+        $otherImg = $v['other_images'] ?? null;
+        if (! empty($v['images']) && is_array($v['images'])) {
+            $imgs = array_values(array_filter(array_map('trim', $v['images'])));
+            $mainImg = $imgs[0] ?? $mainImg;
+            $otherImg = (count($imgs) > 1) ? implode('|', array_slice($imgs, 1)) : $otherImg;
+        }
+
+        $localRowId = isset($v['local_row_id']) ? (int) $v['local_row_id'] : (isset($v['row_id']) ? (int) $v['row_id'] : null);
+
+        $row = [
+            'local_row_id' => $localRowId,
+            'parent_local_row_id' => isset($v['parent_row_id']) ? (int) $v['parent_row_id'] : null,
+            'parent_listing_id' => $parent?->id,
+            'parent_sku' => $v['parent_sku'] ?? null,
+            'account_id' => $acc->id,
+            'platform' => $v['platform'] ?? 'amazon',
+            'marketplace' => $mp,
+            'product_code' => $v['product_code'] ?? ($parent?->product_code),
+            'product_id' => $prod?->id,
+            'sku' => $sku,
+            'variation_theme' => $v['variation_theme'] ?? null,
+            'variant_color' => $v['variant_color'] ?? null,
+            'variant_size' => $v['variant_size'] ?? null,
+            'variant_code' => $v['variant_code'] ?? null,
+            'variant_value' => $v['variant_value'] ?? null,
+            'design_code' => $v['design_code'] ?? null,
+            'design_id' => $design?->id,
+            'main_image' => $mainImg,
+            'other_images' => $otherImg,
+            'price' => $v['price'] ?? null,
+            'product_price' => $v['product_price'] ?? null,
+            'shipping_fee' => $v['shipping_fee'] ?? null,
+            'currency' => $v['currency'] ?? null,
+            'quantity' => $v['quantity'] ?? null,
+            'pkg_length' => $v['pkg_length'] ?? null,
+            'pkg_width' => $v['pkg_width'] ?? null,
+            'pkg_height' => $v['pkg_height'] ?? null,
+            'pkg_weight' => $v['pkg_weight'] ?? null,
+            'pricing_json' => $v['pricing_json'] ?? null,
+            'shipping_json' => $v['shipping_json'] ?? null,
+            'status' => $this->safeEnum($v['status'] ?? null, ['draft', 'planned', 'candidate', 'ready', 'published', 'error', 'archived'], 'planned'),
+            'source' => $v['source'] ?? null,
+            'generated_at' => $v['generated_at'] ?? null,
+            'edited_at' => $v['edited_at'] ?? null,
+            'notes' => $v['notes'] ?? null,
+            'pushed_by' => $this->pushedBy($r, $payload),
+        ];
+
+        // 定位已有行：local_row_id 优先 → 回落业务键
+        $existing = null;
+        if ($localRowId) {
+            $existing = ListingVariant::where('local_row_id', $localRowId)->first();
+        }
+        if (! $existing) {
+            $existing = ListingVariant::where('account_id', $acc->id)
+                ->where('marketplace', $mp)->where('sku', $sku)->first();
+        }
+
+        if ($existing) {
+            $existing->fill($row);
+            $existing->revision = (int) $existing->revision + 1;
+            $existing->save();
+            $stats['variants']['updated']++;
+        } else {
+            $row['revision'] = 1;
+            ListingVariant::create($row);
+            $stats['variants']['created']++;
+        }
+    }
+
     public function pull(Request $r)
     {
         $scopes = array_filter(explode(',', (string) $r->query('scope', 'products,designs,listings')));
@@ -297,6 +422,36 @@ class SyncController extends Controller
             ])->values();
         }
 
+        // ★ 变体子体（独立表）
+        if (in_array('variants', $scopes)) {
+            $q = ListingVariant::query();
+            if ($since) { $q->where('updated_at', '>=', $since); }
+            if ($mp) { $q->where('marketplace', strtoupper($mp)); }
+            $out['variants'] = $q->get()->map(fn ($v) => [
+                'local_row_id' => $v->local_row_id,
+                'parent_local_row_id' => $v->parent_local_row_id,
+                'parent_listing_id' => $v->parent_listing_id,
+                'parent_sku' => $v->parent_sku,
+                'marketplace' => $v->marketplace,
+                'product_code' => $v->product_code,
+                'sku' => $v->sku,
+                'variation_theme' => $v->variation_theme,
+                'variant_color' => $v->variant_color, 'variant_size' => $v->variant_size,
+                'variant_code' => $v->variant_code, 'variant_value' => $v->variant_value,
+                'design_code' => $v->design_code,
+                'main_image' => $v->main_image, 'other_images' => $v->other_images,
+                'price' => $v->price, 'product_price' => $v->product_price,
+                'shipping_fee' => $v->shipping_fee, 'currency' => $v->currency, 'quantity' => $v->quantity,
+                'pkg_length' => $v->pkg_length, 'pkg_width' => $v->pkg_width,
+                'pkg_height' => $v->pkg_height, 'pkg_weight' => $v->pkg_weight,
+                'pricing_json' => $v->pricing_json, 'shipping_json' => $v->shipping_json,
+                'status' => $v->status, 'source' => $v->source,
+                'generated_at' => $v->generated_at, 'edited_at' => $v->edited_at, 'notes' => $v->notes,
+                'pushed_by' => $v->pushed_by,
+                'updated_at' => $v->updated_at,
+            ])->values();
+        }
+
         return ['ok' => true, 'data' => $out];
     }
 
@@ -350,7 +505,7 @@ class SyncController extends Controller
 
     private const H_PRODUCTS = ['id','spu_code','cn_name','en_name','alias','factory','material','material_en','technology','release_time','is_custom','default_color_id','default_color_name','default_size_id','default_size_name','variant_id','variant_code','variants_count','colors','sizes','size_L_cm','size_W_cm','size_H_cm','package_L_cm','package_W_cm','package_H_cm','volume_cm3','weight_g','design_face_w','design_face_h','design_face_count','min_price','qty_from','qty_to','retail_price','gold_price','platinum_price','diamond_price','black_diamond_price','star_diamond_price','shipping_US','shipping_UK','shipping_CA','shipping_DE','shipping_MX','shipping_FR','shipping_ES','shipping_IT','shipping_channel_US','shipping_channel_UK','shipping_channel_CA','shipping_channel_DE','shipping_channel_MX','shipping_channel_FR','shipping_channel_ES','shipping_channel_IT','freight_template_US','freight_template_UK','freight_template_CA','freight_template_DE','freight_template_MX','freight_template_FR','freight_template_ES','freight_template_IT','shipping_updated_at','price_US','price_UK','price_CA','price_DE','price_MX','price_FR','price_ES','price_IT','price_currency','rate_note','status','notes','created_at','updated_at'];
     private const H_LISTING_COPY = ['id','design_code','marketplace','product_type','sku','item_name','highlight','bullet_1','bullet_2','bullet_3','bullet_4','bullet_5','product_description','generic_keyword','material','fabric_type','color','size','capacity','capacity_unit','model_number','model_name','handling_time','country_of_origin','price','currency','template','amazon_template','status','source','generated_at','edited_at','updated_by','review_notes','notes','shipping_fee','product_price','attrs_json','row_id'];
-    private const H_VARIANTS = ['row_id','parent_row_id','id','marketplace','sku','parent_sku','variation_theme','variant_value','variant_code','variant_color','variant_size','design_code','main_image','other_images','price','product_price','shipping_fee','quantity','status','source','generated_at','edited_at','notes'];
+    private const H_VARIANTS = ['row_id','parent_row_id','id','marketplace','sku','parent_sku','variation_theme','variant_value','variant_code','variant_color','variant_size','design_code','main_image','other_images','price','product_price','shipping_fee','quantity','pkg_length','pkg_width','pkg_height','pkg_weight','status','source','generated_at','edited_at','notes'];
     private const H_DESIGNS = ['design_code','product_id','design_key','version','parent_code','source','adjust','cn_name','en_name','design_zh_name','design_zh_tags','design_en_name','design_en_tags','design_pattern','design_template','gallery_codes','effect_image_count','main_image','other_images','status','notes','created_at','updated_at'];
 
     private function pullCsvOne(string $dataset, ?string $since, ?string $mp)
@@ -387,10 +542,10 @@ class SyncController extends Controller
                         'retail_price' => $g('retail_price'), 'gold_price' => $g('gold_price'),
                         'platinum_price' => $g('platinum_price'), 'diamond_price' => $g('diamond_price'),
                         'black_diamond_price' => $g('black_diamond_price'), 'star_diamond_price' => $g('star_diamond_price'),
-                        'shipping_US' => $g('shipping_US'), 'shipping_UK' => $g('shipping_UK'),
-                        'shipping_CA' => $g('shipping_CA'), 'shipping_DE' => $g('shipping_DE'),
-                        'shipping_MX' => $g('shipping_MX'), 'shipping_FR' => $g('shipping_FR'),
-                        'shipping_ES' => $g('shipping_ES'), 'shipping_IT' => $g('shipping_IT'),
+                        'shipping_US' => $p->shipping_US ?? $g('shipping_US'), 'shipping_UK' => $p->shipping_UK ?? $g('shipping_UK'),
+                        'shipping_CA' => $p->shipping_CA ?? $g('shipping_CA'), 'shipping_DE' => $p->shipping_DE ?? $g('shipping_DE'),
+                        'shipping_MX' => $p->shipping_MX ?? $g('shipping_MX'), 'shipping_FR' => $p->shipping_FR ?? $g('shipping_FR'),
+                        'shipping_ES' => $p->shipping_ES ?? $g('shipping_ES'), 'shipping_IT' => $p->shipping_IT ?? $g('shipping_IT'),
                         'shipping_channel_US' => $g('shipping_channel_US'), 'shipping_channel_UK' => $g('shipping_channel_UK'),
                         'shipping_channel_CA' => $g('shipping_channel_CA'), 'shipping_channel_DE' => $g('shipping_channel_DE'),
                         'shipping_channel_MX' => $g('shipping_channel_MX'), 'shipping_channel_FR' => $g('shipping_channel_FR'),
@@ -399,11 +554,12 @@ class SyncController extends Controller
                         'freight_template_CA' => $g('freight_template_CA'), 'freight_template_DE' => $g('freight_template_DE'),
                         'freight_template_MX' => $g('freight_template_MX'), 'freight_template_FR' => $g('freight_template_FR'),
                         'freight_template_ES' => $g('freight_template_ES'), 'freight_template_IT' => $g('freight_template_IT'),
-                        'shipping_updated_at' => $g('shipping_updated_at'),
-                        'price_US' => $g('price_US'), 'price_UK' => $g('price_UK'),
-                        'price_CA' => $g('price_CA'), 'price_DE' => $g('price_DE'),
-                        'price_MX' => $g('price_MX'), 'price_FR' => $g('price_FR'),
-                        'price_ES' => $g('price_ES'), 'price_IT' => $g('price_IT'),
+                        'shipping_updated_at' => $p->shipping_updated_at ?? $g('shipping_updated_at'),
+                        'shipping_variant' => $p->shipping_variant ?? $g('shipping_variant'),
+                        'price_US' => $p->price_US ?? $g('price_US'), 'price_UK' => $p->price_UK ?? $g('price_UK'),
+                        'price_CA' => $p->price_CA ?? $g('price_CA'), 'price_DE' => $p->price_DE ?? $g('price_DE'),
+                        'price_MX' => $p->price_MX ?? $g('price_MX'), 'price_FR' => $p->price_FR ?? $g('price_FR'),
+                        'price_ES' => $p->price_ES ?? $g('price_ES'), 'price_IT' => $p->price_IT ?? $g('price_IT'),
                         'price_currency' => $p->currency, 'rate_note' => $g('rate_note'),
                         'status' => $p->status, 'notes' => $g('notes'),
                         'created_at' => $p->created_at, 'updated_at' => $p->updated_at,
@@ -448,27 +604,27 @@ class SyncController extends Controller
                 return $this->csvResponse('listing_copy.csv', self::H_LISTING_COPY, $rows);
 
             case 'listing_variants':
-                $q = Listing::where('is_parent', false); if ($since) { $q->where('updated_at', '>=', $since); } if ($mp) { $q->where('marketplace', strtoupper($mp)); }
+                $q = ListingVariant::query(); if ($since) { $q->where('updated_at', '>=', $since); } if ($mp) { $q->where('marketplace', strtoupper($mp)); }
                 $rows = $q->get()->map(function ($l) use ($codeOf, $designCode) {
-                    // R5：变体长尾字段还原自 variant_json 桶
-                    $vj = is_array($l->variant_json) ? $l->variant_json : [];
-                    $g = fn ($col) => $vj[$col] ?? '';
-
+                    // 列对齐本地 listing_variants.csv（含 pkg_* + 逐规格价）
                     return [
-                        'row_id' => $l->id, 'parent_row_id' => $l->parent_row_id,
+                        'row_id' => $l->local_row_id,
+                        'parent_row_id' => $l->parent_local_row_id,
                         'id' => $l->product_code ?: ($codeOf[$l->product_id] ?? null),
                         'marketplace' => $l->marketplace,
                         'sku' => $l->sku, 'parent_sku' => $l->parent_sku, 'variation_theme' => $l->variation_theme,
-                        'variant_value' => $g('variant_value') !== '' ? $g('variant_value') : trim(($l->variant_color ?? '') . ' ' . ($l->variant_size ?? '')),
+                        'variant_value' => $l->variant_value ?: trim(($l->variant_color ?? '') . ' ' . ($l->variant_size ?? '')),
                         'variant_code' => $l->variant_code,
                         'variant_color' => $l->variant_color, 'variant_size' => $l->variant_size,
                         'design_code' => $l->design_code ?: ($designCode[$l->design_id] ?? null),
-                        // ★ R1 修复：图列此前在表头里但从未赋值 → CSV 导出恒为空（JSON 通道有值）
                         'main_image' => $l->main_image, 'other_images' => $l->other_images,
                         'price' => $l->price, 'product_price' => $l->product_price, 'shipping_fee' => $l->shipping_fee,
-                        'quantity' => $l->quantity, 'status' => $l->status,
-                        'source' => $g('source'), 'generated_at' => $g('generated_at'),
-                        'edited_at' => $l->updated_at, 'notes' => $g('notes'),
+                        'quantity' => $l->quantity,
+                        'pkg_length' => $l->pkg_length, 'pkg_width' => $l->pkg_width,
+                        'pkg_height' => $l->pkg_height, 'pkg_weight' => $l->pkg_weight,
+                        'status' => $l->status,
+                        'source' => $l->source, 'generated_at' => $l->generated_at,
+                        'edited_at' => $l->edited_at ?: $l->updated_at, 'notes' => $l->notes,
                     ];
                 })->all();
 

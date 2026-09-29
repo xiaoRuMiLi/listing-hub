@@ -6,6 +6,7 @@ use App\Domain\Design\Models\Design;
 use App\Domain\Identity\Models\Account;
 use App\Domain\Listing\Models\Listing;
 use App\Domain\Listing\Models\ListingRevision;
+use App\Domain\Listing\Models\ListingVariant;
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -254,7 +255,21 @@ class ListingController extends Controller
     {
         $l = Listing::findOrFail($id);
 
-        return ['ok' => true, 'data' => $l->children()->get()];
+        // ★ 变体子体改读独立表 listing_variants（parent_listing_id 优先；parent_sku 兜底）
+        $variants = ListingVariant::query()
+            ->where(function ($q) use ($l) {
+                $q->where('parent_listing_id', $l->id);
+                if ($l->sku) {
+                    $q->orWhere(fn ($w) => $w->whereNull('parent_listing_id')
+                        ->where('parent_sku', $l->sku)
+                        ->where('account_id', $l->account_id)
+                        ->where('marketplace', $l->marketplace));
+                }
+            })
+            ->orderBy('id')
+            ->get();
+
+        return ['ok' => true, 'data' => $variants];
     }
 
     /** ★ 一键换图床：该 listing 的图片（无则取其设计）镜像 OSS 并改写；返回逐张结果 */
