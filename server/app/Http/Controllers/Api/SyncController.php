@@ -145,8 +145,11 @@ class SyncController extends Controller
                 $prod = Product::where('code', (string) ($s['product_code'] ?? ''))->first();
                 $country = strtoupper((string) ($s['country'] ?? ''));
                 if ($prod === null || $country === '') { continue; }
+                // ★ R13（2026-09-30）：幂等键必须带 product_variant_id=null。
+                //   旧键 ['product_id','country'] 会命中同商品**变体级**行（变体行也带 product_id）
+                //   → 商品级 UK 永远生不出来（被变体 UK 行"吃掉"）。
                 ProductShipping::updateOrCreate(
-                    ['product_id' => $prod->id, 'country' => $country],
+                    ['product_id' => $prod->id, 'product_variant_id' => null, 'country' => $country],
                     ['amount' => $s['amount'] ?? null, 'currency' => $s['currency'] ?? null, 'channel' => $s['channel'] ?? null, 'updated_at' => now()],
                 );
                 $stats['product_shipping']['updated']++;
