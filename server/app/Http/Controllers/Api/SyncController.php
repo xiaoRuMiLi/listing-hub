@@ -468,10 +468,14 @@ class SyncController extends Controller
         $mp = $r->query('marketplace');
         $limit = (int) $r->query('limit', 0);                 // ★ R8：每数据集限量（0=不限，向后兼容）
         $inclDel = (bool) $r->query('include_deleted', false); // ★ R10：连软删行一起拉
+        // ★ R14（2026-09-30）：按指纹 ID 过滤 —— ids=12674,12680（空=全量，向后兼容）
+        //   命中范围：products.code 及其**全部关联表**（designs/product_variants 经 product_id；
+        //   listing_copy/listing_variants 经 product_code；product_shipping 商品级 + 变体级两路）。
+        $ids = array_values(array_unique(array_filter(array_map('trim', explode(',', (string) $r->query('ids', ''))), 'strlen')));
         $cursor = now()->toIso8601String();
 
         if ($r->query('format') === 'csv') {
-            return $this->pullCsvOne((string) $r->query('dataset', 'products'), $since, $mp);
+            return $this->pullCsvOne((string) $r->query('dataset', 'products'), $since, $mp, $ids);
         }
 
         $out = ['cursor' => $cursor];
@@ -480,6 +484,7 @@ class SyncController extends Controller
             $q = Product::query();
             if ($inclDel) { $q->withTrashed(); }
             if ($since) { $q->where('updated_at', '>=', $since); }
+            if ($ids) { $q->whereIn('code', $ids); }
             $out['products'] = $q->get()->map(fn ($p) => [
                 'code' => $p->code, 'spu_code' => $p->spu_code, 'is_custom' => $p->is_custom,
                 'factory' => $p->factory,
@@ -498,6 +503,7 @@ class SyncController extends Controller
             $q = Design::query();
             if ($inclDel) { $q->withTrashed(); }
             if ($since) { $q->where('updated_at', '>=', $since); }
+            if ($ids) { $q->whereIn('product_id', $this->productIdsOfCodes($ids)); }
             $out['designs'] = $q->get()->map(fn ($d) => [
                 'design_code' => $d->design_code, 'design_key' => $d->design_key, 'version' => $d->version,
                 'parent_code' => $d->parent_code, 'source' => $d->source,
@@ -518,6 +524,7 @@ class SyncController extends Controller
             if ($inclDel) { $q->withTrashed(); }
             if ($since) { $q->where('updated_at', '>=', $since); }
             if ($mp) { $q->where('marketplace', strtoupper($mp)); }
+            if ($ids) { $q->whereIn('product_code', $ids); }
             $out['listings'] = $q->get()->map(fn ($l) => [
                 'sku' => $l->sku, 'marketplace' => $l->marketplace, 'status' => $l->status,
                 'parent_sku' => $l->parent_sku, 'is_parent' => $l->is_parent,
@@ -553,6 +560,7 @@ class SyncController extends Controller
             if ($inclDel) { $q->withTrashed(); }
             if ($since) { $q->where('updated_at', '>=', $since); }
             if ($mp) { $q->where('marketplace', strtoupper($mp)); }
+            if ($ids) { $q->whereIn('product_code', $ids); }
             $parentLocalOf = Listing::whereNotNull('local_row_id')->pluck('local_row_id', 'id');   // ★ R1：listing.id → 父体本地 row_id
             $out['variants'] = $q->get()->map(function ($v) use ($parentLocalOf) {
                 return [
@@ -587,6 +595,7 @@ class SyncController extends Controller
         if (in_array('product_variants', $scopes)) {
             $q = ProductVariant::query();
             if ($since) { $q->where('updated_at', '>=', $since); }
+            if ($ids) { $q->whereIn('product_id', $this->productIdsOfCodes($ids)); }
             $codeOf = Product::pluck('code', 'id');
             $out['product_variants'] = $q->get()->map(fn ($v) => [
                 'product_code' => $codeOf[$v->product_id] ?? null,
@@ -607,6 +616,7 @@ class SyncController extends Controller
         if (in_array('product_shipping', $scopes)) {
             $q = ProductShipping::query();
             if ($since) { $q->where('updated_at', '>=', $since); }
+            if ($ids) { $this->scopeShippingToCodes($q, $ids); }
             $codeOf = Product::pluck('code', 'id');
             $extOf = ProductVariant::pluck('external_variant_id', 'id');
             $pvProductOf = ProductVariant::pluck('product_id', 'id');   // ★ R2：product_variant_id → product_id
@@ -687,14 +697,17 @@ class SyncController extends Controller
     private const H_PRODUCT_VARIANTS = ['product_code','external_variant_id','color','size','spec_json','weight_g','size_l_cm','size_w_cm','size_h_cm','pkg_l_cm','pkg_w_cm','pkg_h_cm','volume_cm3','status','updated_at'];
     private const H_PRODUCT_SHIPPING = ['product_code','external_variant_id','country','amount','currency','channel','updated_at'];
 
-    private function pullCsvOne(string $dataset, ?string $since, ?string $mp)
+    private function pullCsvOne(string $dataset, ?string $since, ?string $mp, array $ids = [])
     {
         $codeOf = Product::pluck('code', 'id');           // product_id -> code
         $designCode = Design::pluck('design_code', 'id');  // design_id -> design_code
+        // ★ R14：按指纹 ID 过滤时，先把 code 集映射为 product_id 集（供 designs/product_variants 用）
+        $pidOfCodes = $ids ? Product::whereIn('code', $ids)->pluck('id')->all() : [];
 
         switch ($dataset) {
             case 'products':
                 $q = Product::query(); if ($since) { $q->where('updated_at', '>=', $since); }
+                if ($ids) { $q->whereIn('code', $ids); }
                 $rows = $q->get()->map(function ($p) {
                     // R3：长尾字段还原自 profile_json 桶（键名对齐本地 products.csv 列名）
                     $prof = is_array($p->profile_json) ? $p->profile_json : [];
@@ -750,6 +763,7 @@ class SyncController extends Controller
 
             case 'listing_copy':
                 $q = Listing::where('is_parent', true); if ($since) { $q->where('updated_at', '>=', $since); } if ($mp) { $q->where('marketplace', strtoupper($mp)); }
+                if ($ids) { $q->whereIn('product_code', $ids); }
                 $rows = $q->get()->map(function ($l) use ($codeOf, $designCode) {
                     // ★ R2 修复：文案 26 列还原自 copy_json 桶（键名对齐本地 listing_copy.csv 列名）
                     //   此前该 case 完全没读桶 → CSV 导出文案全空（JSON 通道有值）
@@ -786,6 +800,7 @@ class SyncController extends Controller
 
             case 'listing_variants':
                 $q = ListingVariant::query(); if ($since) { $q->where('updated_at', '>=', $since); } if ($mp) { $q->where('marketplace', strtoupper($mp)); }
+                if ($ids) { $q->whereIn('product_code', $ids); }
                 $parentLocalOf = Listing::whereNotNull('local_row_id')->pluck('local_row_id', 'id');        // ★ R1
                 $pvByProductCode = $this->specsByProductCode();                                            // ★ R3b
                 $rows = $q->get()->map(function ($l) use ($codeOf, $designCode, $parentLocalOf, $pvByProductCode) {
@@ -820,6 +835,7 @@ class SyncController extends Controller
 
             case 'designs':
                 $q = Design::query(); if ($since) { $q->where('updated_at', '>=', $since); }
+                if ($ids) { $q->whereIn('product_id', $pidOfCodes); }
                 $rows = $q->get()->map(fn ($d) => [
                     'design_code' => $d->design_code, 'product_id' => $codeOf[$d->product_id] ?? null,
                     'design_key' => $d->design_key, 'version' => $d->version, 'parent_code' => $d->parent_code,
@@ -841,6 +857,7 @@ class SyncController extends Controller
 
             case 'product_variants':
                 $q = ProductVariant::query(); if ($since) { $q->where('updated_at', '>=', $since); }
+                if ($ids) { $q->whereIn('product_id', $pidOfCodes); }
                 $rows = $q->get()->map(fn ($v) => [
                     'product_code' => $codeOf[$v->product_id] ?? null,
                     'external_variant_id' => $v->external_variant_id,
@@ -857,6 +874,7 @@ class SyncController extends Controller
 
             case 'product_shipping':
                 $q = ProductShipping::query(); if ($since) { $q->where('updated_at', '>=', $since); }
+                if ($ids) { $this->scopeShippingToCodes($q, $ids); }
                 $extOf = ProductVariant::pluck('external_variant_id', 'id');
                 $pvProductOf = ProductVariant::pluck('product_id', 'id');   // ★ R2
                 $rows = $q->get()->map(fn ($s) => [
@@ -942,6 +960,28 @@ class SyncController extends Controller
         $v = strtolower(trim((string) $val));
 
         return in_array($v, $allowed, true) ? $v : $default;
+    }
+
+    /** ★ R14：指纹 ID（products.code）→ product_id 集（供 designs/product_variants 按 product_id 过滤） */
+    private function productIdsOfCodes(array $ids): array
+    {
+        return Product::whereIn('code', $ids)->pluck('id')->all();
+    }
+
+    /**
+     * ★ R14：把运费查询限定到指定指纹 ID。
+     * 商品级行用 product_id；**变体级行 product_id 可能为空** → 还要命中其 product_variant_id。
+     * 两路合并（OR），确保商品级 + 逐规格运费都被拉回。
+     */
+    private function scopeShippingToCodes($q, array $ids): void
+    {
+        $pids = Product::whereIn('code', $ids)->pluck('id')->all();
+        $vids = $pids ? ProductVariant::whereIn('product_id', $pids)->pluck('id')->all() : [];
+        $q->where(function ($w) use ($pids, $vids) {
+            if ($pids) { $w->whereIn('product_id', $pids); }
+            if ($vids) { $w->orWhereIn('product_variant_id', $vids); }
+            if (! $pids && ! $vids) { $w->whereRaw('1 = 0'); }   // 无匹配 → 返回空，不误拉全量
+        });
     }
 
     /** ★ R3b：规格层按 product_code 分组（供子体 pkg 兜底 derive） */
