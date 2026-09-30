@@ -49,6 +49,8 @@ DELETE /tokens/{id}
 
 ### 2.1 `POST /sync/push` —— 本地→中台（幂等 upsert）
 
+> ★ **R15（2026-09-30）**：同一份数据**软删后再推 → 自动 `restore`（复活）再更新**（不再撞唯一键报错；也不产生幽灵活行）。适用于 `products` / `designs` / `listings` / `listing_variants` / `product_variants` / `product_shipping`。
+
 ```jsonc
 {
   "machine_id": "ws-A",

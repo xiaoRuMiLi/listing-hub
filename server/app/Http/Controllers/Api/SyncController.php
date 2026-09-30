@@ -42,7 +42,8 @@ class SyncController extends Controller
             foreach (($payload['products'] ?? []) as $p) {
                 $code = (string) ($p['code'] ?? '');
                 if ($code === '') { continue; }
-                $existing = Product::where('code', $code)->first();
+                // ★ R15：含软删查找（命中软删则 restore → 复活后再更新）
+                $existing = $this->firstWithTrashed(Product::class, ['code' => $code]);
                 $attrs = [
                     'code' => $code,
                     'spu_code' => $p['spu_code'] ?? null,
@@ -134,7 +135,7 @@ class SyncController extends Controller
                     'status' => $this->safeEnum($d['status'] ?? null, ['draft', 'active', 'superseded', 'archived'], 'active'),
                 ];
                 if ($prod === null) { unset($row['product_id']); }
-                $existing = Design::where('design_code', $dc)->first();
+                $existing = $this->firstWithTrashed(Design::class, ['design_code' => $dc]);
                 if ($existing) { $existing->update($row); $stats['designs']['updated']++; }
                 elseif ($prod !== null) { Design::create($row); $stats['designs']['created']++; }
                 else { $stats['designs']['skipped']++; }
@@ -148,10 +149,10 @@ class SyncController extends Controller
                 // ★ R13（2026-09-30）：幂等键必须带 product_variant_id=null。
                 //   旧键 ['product_id','country'] 会命中同商品**变体级**行（变体行也带 product_id）
                 //   → 商品级 UK 永远生不出来（被变体 UK 行"吃掉"）。
-                ProductShipping::updateOrCreate(
-                    ['product_id' => $prod->id, 'product_variant_id' => null, 'country' => $country],
-                    ['amount' => $s['amount'] ?? null, 'currency' => $s['currency'] ?? null, 'channel' => $s['channel'] ?? null, 'updated_at' => now()],
-                );
+                $psKeys = ['product_id' => $prod->id, 'product_variant_id' => null, 'country' => $country];
+                $psVals = ['amount' => $s['amount'] ?? null, 'currency' => $s['currency'] ?? null, 'channel' => $s['channel'] ?? null, 'updated_at' => now()];
+                $psRow = $this->firstWithTrashed(ProductShipping::class, $psKeys);
+                if ($psRow) { $psRow->update($psVals); } else { ProductShipping::create($psKeys + $psVals); }
                 $stats['product_shipping']['updated']++;
             }
 
@@ -163,9 +164,9 @@ class SyncController extends Controller
                 $prod = Product::where('code', (string) ($pv['product_code'] ?? ''))->first();
                 $ext = (string) ($pv['external_variant_id'] ?? '');
                 if ($prod === null || $ext === '') { continue; }
-                $row = ProductVariant::updateOrCreate(
-                    ['product_id' => $prod->id, 'external_variant_id' => $ext],
-                    [
+                $pvKeys = ['product_id' => $prod->id, 'external_variant_id' => $ext];
+                $row = $this->firstWithTrashed(ProductVariant::class, $pvKeys) ?: new ProductVariant($pvKeys);
+                $row->fill([
                         'color' => $pv['color'] ?? null,
                         'color_name' => $pv['color_name'] ?? null,   // ★ R3b：规格颜色名（子体 pkg 兜底 derive 用）
                         'size' => $pv['size'] ?? ($pv['size_id'] ?? null),
@@ -180,8 +181,8 @@ class SyncController extends Controller
                         'pkg_h_cm' => $pv['pkg_h_cm'] ?? ($pv['size_h_cm'] ?? null),
                         'volume_cm3' => $pv['volume_cm3'] ?? null,
                         'status' => $pv['status'] ?? 'synced',
-                    ],
-                );
+                    ]);
+                $row->save();
                 $variantIdMap[(string) $pv['product_code']][$ext] = $row->id;
                 $variantIdMapProduct[(string) $pv['product_code']][$ext] = $row->product_id;   // ★ R2：供 variant_shipping 冗余回填 product_id
                 $stats['product_variants']['updated']++;
@@ -195,17 +196,17 @@ class SyncController extends Controller
                 if ($pc === '' || $ext === '' || $country === '') { continue; }
                 $vid = $variantIdMap[$pc][$ext] ?? optional(ProductVariant::where('external_variant_id', $ext)->first())->id;
                 if (! $vid) { continue; }
-                ProductShipping::updateOrCreate(
-                    ['product_variant_id' => $vid, 'country' => $country],
-                    [
+                $vsKeys = ['product_variant_id' => $vid, 'country' => $country];
+                $vsRow = $this->firstWithTrashed(ProductShipping::class, $vsKeys) ?: new ProductShipping($vsKeys);
+                $vsRow->fill([
                         // ★ R2：冗余回填 product_id（否则变体级运费导出时 product_code 为空 → “无归属”行）
                         'product_id' => $variantIdMapProduct[$pc][$ext] ?? optional(ProductVariant::find($vid))->product_id,
                         'amount' => $vs['amount'] ?? null,
                         'currency' => $vs['currency'] ?? null,
                         'channel' => $vs['channel'] ?? null,
                         'updated_at' => now(),
-                    ],
-                );
+                    ]);
+                $vsRow->save();
                 $stats['variant_shipping']['updated']++;
             }
 
@@ -251,7 +252,7 @@ class SyncController extends Controller
                 // ★ R9：图 URL 归一（已是 OSS 则不动；未 OSS → 计数回执，sync_images/normalize_images 时立即镜像）
                 foreach ($imgs as $i => $u) { $imgs[$i] = $this->ossUrl((string) $u, $doMirror, $pendingBlobs); }
 
-                $existing = Listing::where('account_id', $acc->id)->where('marketplace', $mp)->where('sku', $sku)->first();
+                $existing = $this->firstWithTrashed(Listing::class, ['account_id' => $acc->id, 'marketplace' => $mp, 'sku' => $sku]);
 
                 $row = [
                     'account_id' => $acc->id,
@@ -441,12 +442,10 @@ class SyncController extends Controller
         // 定位已有行：跨端键 (account, marketplace, local_row_id) 优先 → 回落业务键 (account, marketplace, sku)
         $existing = null;
         if ($localRowId) {
-            $existing = ListingVariant::where('account_id', $acc->id)
-                ->where('marketplace', $mp)->where('local_row_id', $localRowId)->first();
+            $existing = $this->firstWithTrashed(ListingVariant::class, ['account_id' => $acc->id, 'marketplace' => $mp, 'local_row_id' => $localRowId]);
         }
         if (! $existing) {
-            $existing = ListingVariant::where('account_id', $acc->id)
-                ->where('marketplace', $mp)->where('sku', $sku)->first();
+            $existing = $this->firstWithTrashed(ListingVariant::class, ['account_id' => $acc->id, 'marketplace' => $mp, 'sku' => $sku]);
         }
 
         if ($existing) {
@@ -695,6 +694,24 @@ class SyncController extends Controller
     private const H_VARIANTS = ['row_id','parent_row_id','id','marketplace','sku','parent_sku','variation_theme','variant_value','variant_code','variant_color','variant_size','design_code','main_image','other_images','price','product_price','shipping_fee','quantity','pkg_length','pkg_width','pkg_height','pkg_weight','status','source','generated_at','edited_at','notes'];
     private const H_DESIGNS = ['design_code','product_id','design_key','version','parent_code','source','adjust','cn_name','en_name','design_zh_name','design_zh_tags','design_en_name','design_en_tags','design_pattern','design_template','gallery_codes','effect_image_count','main_image','other_images','status','notes','created_at','updated_at'];
     private const H_PRODUCT_VARIANTS = ['product_code','external_variant_id','color','size','spec_json','weight_g','size_l_cm','size_w_cm','size_h_cm','pkg_l_cm','pkg_w_cm','pkg_h_cm','volume_cm3','status','updated_at'];
+    /**
+     * ★ R15（2026-09-30）：含软删查找——活行优先，否则取最近一条软删行；命中软删则先 restore。
+     * 让 push 具备「删除后再推 = 复活该行再更新」的语义（此前软删行对 push 不可见 →
+     * products/listings/listing_variants 撞唯一键报错、designs 等会新建幽灵活行）。
+     */
+    private function firstWithTrashed(string $model, array $where)
+    {
+        $row = $model::where($where)->first();
+        if (! $row) {
+            $row = $model::onlyTrashed()->where($where)->orderByDesc('deleted_at')->first();
+        }
+        if ($row && $row->trashed()) {
+            $row->restore();
+        }
+
+        return $row;
+    }
+
     private const H_PRODUCT_SHIPPING = ['product_code','external_variant_id','country','amount','currency','channel','updated_at'];
 
     private function pullCsvOne(string $dataset, ?string $since, ?string $mp, array $ids = [])
