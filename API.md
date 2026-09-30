@@ -136,7 +136,8 @@ GET /sync/pull?scope=products,listings,designs&marketplace=A1F83G8C2ARO7P&since=
 - `since`：增量（省略=全量）；用返回的 `cursor` 做"接着拉"。
 - `format`：`json`（给 Agent）或 `csv`（给现成工具链，返回 zip）。
 - ★ **R8**：`limit`（每个数据集最多返回条数；`0`/省略=不限，**向后兼容**）。
-- ★ **R10**：`include_deleted=1` 连**软删**行一起返回（默认不返回；`products`/`designs`/`listings`/`variants` 生效）。
+- ★ **R10**：`include_deleted=1` 连**软删**行一起返回（默认不返回）。
+- ★ **R16.1**：`include_deleted` 现覆盖**全部数据集**（含 `product_variants` / `product_shipping`），且各行回传 **`deleted_at`** 字段（非空 = 软删）便于识别。
 - ★ **R1**：`listing_copy` 导出的 `row_id` = 父体**本地** `row_id`（无则回退中台 id）；`listing_variants` 的 `parent_row_id` 亦以父体本地 `row_id` 为准。
 - ★ **R3b**：`listing_variants` 的 `pkg_*` 为空时，导出会**由 `product_variants` 规格层 derive**（不落库）。
 

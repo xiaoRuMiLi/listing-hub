@@ -496,6 +496,7 @@ class SyncController extends Controller
                 'detail_json' => $p->detail_json, 'profile_json' => $p->profile_json,
                 'pushed_by' => $p->pushed_by,
                 'updated_at' => $p->updated_at,
+                'deleted_at' => $p->deleted_at,   // ★ R16.1：使 include_deleted 可辨识
             ])->values();
         }
         if (in_array('designs', $scopes)) {
@@ -516,6 +517,7 @@ class SyncController extends Controller
                 'status' => $d->status, 'notes' => $d->notes,
                 'pushed_by' => $d->pushed_by,
                 'updated_at' => $d->updated_at,
+                'deleted_at' => $d->deleted_at,   // ★ R16.1
             ])->values();
         }
         if (in_array('listings', $scopes)) {
@@ -550,6 +552,7 @@ class SyncController extends Controller
                 'last_action_at' => $l->last_action_at,
                 'pushed_by' => $l->pushed_by,
                 'updated_at' => $l->updated_at,
+                'deleted_at' => $l->deleted_at,   // ★ R16.1
             ])->values();
         }
 
@@ -586,6 +589,7 @@ class SyncController extends Controller
                 'generated_at' => $v->generated_at, 'edited_at' => $v->edited_at, 'notes' => $v->notes,
                 'pushed_by' => $v->pushed_by,
                 'updated_at' => $v->updated_at,
+                'deleted_at' => $v->deleted_at,   // ★ R16.1
                 ];
             })->values();
         }
@@ -593,6 +597,7 @@ class SyncController extends Controller
         // ★ 商品规格（指纹规格：颜色×尺寸 + 包装/重量）
         if (in_array('product_variants', $scopes)) {
             $q = ProductVariant::query();
+            if ($inclDel) { $q->withTrashed(); }   // ★ R16.1：与其它数据集对齐
             if ($since) { $q->where('updated_at', '>=', $since); }
             if ($ids) { $q->whereIn('product_id', $this->productIdsOfCodes($ids)); }
             $codeOf = Product::pluck('code', 'id');
@@ -608,6 +613,7 @@ class SyncController extends Controller
                 'pkg_l_cm' => $v->pkg_l_cm, 'pkg_w_cm' => $v->pkg_w_cm, 'pkg_h_cm' => $v->pkg_h_cm,
                 'volume_cm3' => $v->volume_cm3, 'status' => $v->status,
                 'updated_at' => $v->updated_at,
+                'deleted_at' => $v->deleted_at,   // ★ R16.1
             ])->values();
         }
 
@@ -629,6 +635,7 @@ class SyncController extends Controller
                 'country' => $s->country, 'amount' => $s->amount,
                 'currency' => $s->currency, 'channel' => $s->channel,
                 'updated_at' => $s->updated_at,
+                'deleted_at' => $s->deleted_at,   // ★ R16.1
             ])->values();
         }
 
