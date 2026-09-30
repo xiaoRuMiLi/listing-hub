@@ -214,27 +214,24 @@ class DeleteController extends Controller
         $country = strtoupper((string) $r->query('country', ''));
         $scope = (string) $r->query('scope', 'product'); // product|variant|all
 
+        $variantIds = ProductVariant::where('product_id', $product->id)->pluck('id')->all();
         $q = ProductShipping::query();
         if ($scope === 'variant') {
-            $variantIds = ProductVariant::where('product_id', $product->id)->pluck('id')->all();
-            $q->whereIn('product_variant_id', $variantIds ?: [0]);
-            if ($country !== '') {
-                $q->where('country', $country);
-            }
+            // 仅变体级（product_variant_id 非空）
+            $q->whereNotNull('product_variant_id')->whereIn('product_variant_id', $variantIds ?: [0]);
         } elseif ($scope === 'all') {
-            $variantIds = ProductVariant::where('product_id', $product->id)->pluck('id')->all();
+            // 商品级（variant 为空）+ 变体级
             $q->where(function ($w) use ($product, $variantIds) {
-                $w->where('product_id', $product->id)->orWhereIn('product_variant_id', $variantIds ?: [0]);
+                $w->where(function ($x) use ($product) {
+                    $x->where('product_id', $product->id)->whereNull('product_variant_id');
+                })->orWhereIn('product_variant_id', $variantIds ?: [0]);
             });
-            if ($country !== '') {
-                $q->where('country', $country);
-            }
-        } else { // product 级
-            $q->where('product_id', $product->id);
-            if ($country !== '') {
-                $q->where('country', $country);
-            }
+        } else { // product 级：★ R16 只删商品级（product_variant_id 为空）
+            //   旧写法 where('product_id') 会连带命中变体级行（变体行也带 product_id）→
+            //   ① 误删变体级运费 ② 两行同 deleted_at 撞唯一键 → 500
+            $q->where('product_id', $product->id)->whereNull('product_variant_id');
         }
+        if ($country !== '') { $q->where('country', $country); }
         $n = $q->delete();
 
         return ['ok' => true, 'data' => ['code' => $code, 'country' => $country ?: null, 'scope' => $scope, 'soft_deleted' => ['product_shipping' => $n]]];

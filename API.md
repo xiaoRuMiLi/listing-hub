@@ -207,6 +207,20 @@ DELETE /listings/by-sku/{sku}                         # 删 listing + 其子体
 - **Q5 权限**：`users.is_admin=1` 删任意；普通用户只删 `pushed_by` 含自己 email 的 → 否则 **403**
 - **幂等**：删不存在 → `{ok:true, data:{note:"not_found_idempotent"}}`
 
+> ★ **R16（2026-09-30）**：`DELETE /products/{code}/shipping` 修正 scope 语义 ——
+> `scope=product` 仅删商品级（`product_variant_id` 为空）、`scope=variant` 仅删变体级、`scope=all` 两者；
+> 修前 `scope=product` 会连带命中变体级行（变体行也带 `product_id`）→ 误删 + 撞唯一键 500。
+
+### 3.2 ★ 维护：物理清理软删行（R16）
+
+```
+POST / DELETE /api/v1/maintenance/trashed?mode=ghosts|all&tables=<csv>   # 仅管理员
+```
+- `mode=ghosts`（默认）：只清「同一业务键**另有活行**」的软删行（真幽灵行）；
+- `mode=all`：清该表**所有**软删行；
+- 默认 tables：`products,designs,listings,listing_variants,product_variants,product_shipping`。
+- CLI：`node scripts/hub.js purge-trashed [--mode ghosts|all] [--tables ...]`
+
 ```jsonc
 // DELETE /products/10809?force=true → 200
 { "ok": true, "data": {

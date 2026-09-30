@@ -5,6 +5,7 @@ use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\DeleteController;
 use App\Http\Controllers\Api\DesignController;
 use App\Http\Controllers\Api\ListingController;
+use App\Http\Controllers\Api\MaintenanceController;
 use App\Http\Controllers\Api\ProductController;
 use App\Http\Controllers\Api\SyncController;
 use App\Http\Controllers\Api\UserController;
@@ -57,6 +58,9 @@ Route::prefix('v1')->group(function () {
         Route::delete('products/{code}/shipping', [DeleteController::class, 'destroyShipping']);
         Route::delete('designs/by-code/{design_code}', [DeleteController::class, 'destroyDesign']);
         Route::delete('listings/by-sku/{sku}', [DeleteController::class, 'destroyListing']);
+
+        // ★ 维护（R16）：物理清理软删行（幽灵行）——仅管理员
+        Route::match(['post', 'delete'], 'maintenance/trashed', [MaintenanceController::class, 'purgeTrashed']);
 
         // 资产域（OSS 图床）
         Route::post('assets/check', [AssetController::class, 'check']);

@@ -614,6 +614,7 @@ class SyncController extends Controller
         // ★ 商品运费（商品级 + 变体级；含 country/amount/channel）
         if (in_array('product_shipping', $scopes)) {
             $q = ProductShipping::query();
+            if ($inclDel) { $q->withTrashed(); }   // ★ R16：与其它数据集对齐，支持 include_deleted
             if ($since) { $q->where('updated_at', '>=', $since); }
             if ($ids) { $this->scopeShippingToCodes($q, $ids); }
             $codeOf = Product::pluck('code', 'id');
