@@ -31,6 +31,15 @@ Route::prefix('v1')->group(function () {
         Route::post('sync/push', [SyncController::class, 'push']);
         Route::get('sync/pull', [SyncController::class, 'pull']);
 
+        // ★ R17（2026-10-08）：商品级删除必须【先于】apiResource 注册，否则
+        //   被 apiResource 的 `DELETE products/{product}`（按 id 隐式绑定 + 不级联）抢先匹配。
+        //   见 DeleteController（整体删 + 级联软删从属表）。
+        Route::delete('products/{code}', [DeleteController::class, 'destroyProduct']);
+        Route::delete('products/{code}/variants/{external_variant_id}', [DeleteController::class, 'destroyVariant']);
+        Route::delete('products/{code}/shipping', [DeleteController::class, 'destroyShipping']);
+        Route::delete('designs/by-code/{design_code}', [DeleteController::class, 'destroyDesign']);
+        Route::delete('listings/by-sku/{sku}', [DeleteController::class, 'destroyListing']);
+
         // 商品域
         Route::apiResource('products', ProductController::class);
 
@@ -52,12 +61,7 @@ Route::prefix('v1')->group(function () {
         Route::post('listings/{id}/normalize-images', [ListingController::class, 'normalizeImages']);
         Route::apiResource('listings', ListingController::class);
 
-        // ★ 删除（软删）2026-09-29：整体删商品 + 分部删子资源
-        Route::delete('products/{code}', [DeleteController::class, 'destroyProduct']);
-        Route::delete('products/{code}/variants/{external_variant_id}', [DeleteController::class, 'destroyVariant']);
-        Route::delete('products/{code}/shipping', [DeleteController::class, 'destroyShipping']);
-        Route::delete('designs/by-code/{design_code}', [DeleteController::class, 'destroyDesign']);
-        Route::delete('listings/by-sku/{sku}', [DeleteController::class, 'destroyListing']);
+        // ★ R17：删除路由已上移到 apiResource 之前（改于 2026-10-08），见上方。
 
         // ★ 维护（R16）：物理清理软删行（幽灵行）——仅管理员
         Route::match(['post', 'delete'], 'maintenance/trashed', [MaintenanceController::class, 'purgeTrashed']);

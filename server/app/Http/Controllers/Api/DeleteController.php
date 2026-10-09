@@ -82,7 +82,9 @@ class DeleteController extends Controller
     public function destroyProduct(Request $r, string $code)
     {
         $force = filter_var($r->query('force', false), FILTER_VALIDATE_BOOLEAN);
-        $product = Product::where('code', $code)->first();
+        // 先找活行；找不到再找【已软删】的行 —— 用于「重跑级联删」清理历史孤儿从属数据（R17）。
+        // 注意：若商品已软删、从属未级联（旧版路由被 apiResource 遮蔽导致），重跑本接口即可补齐级联。
+        $product = Product::where('code', $code)->first() ?: Product::withTrashed()->where('code', $code)->first();
         if (! $product) {
             return ['ok' => true, 'data' => ['code' => $code, 'soft_deleted' => $this->emptyStats(), 'note' => 'not_found_idempotent']];
         }

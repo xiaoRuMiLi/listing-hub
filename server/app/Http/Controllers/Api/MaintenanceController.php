@@ -24,13 +24,16 @@ use Illuminate\Http\Request;
  *   mode=ghosts|all   （默认 ghosts）
  *     · ghosts：只清「同一业务键另有活行」的软删行（安全，推荐）
  *     · all   ：清掉该表**所有**软删行（含无活行对应的"纯软删"，如历史 GB 运费）
- *   tables=<csv>      默认 products,designs,listings,listing_variants,product_variants,product_shipping
+ *   tables=<csv>      默认 **子表在前**（R18）：product_shipping,listing_variants,listings,product_variants,designs,products
+ *                      ★ 必须「先删子、后删父」——否则 mode=all 硬删父表(products)时子行还在 → 撞外键 → 500。
  *
  * 返回：{ ok:true, data:{ mode, purged:{ <table>: <n> } } }
  */
 class MaintenanceController extends Controller
 {
-    private const TABLES = ['products', 'designs', 'listings', 'listing_variants', 'product_variants', 'product_shipping'];
+    // ★ R18（2026-10-08）：必须【子表在前、父表在后】，`mode=all` 才能一次清完。
+    //   原顺序 products 在第 1 → 硬删商品时子行(designs/listings/variants/shipping)还在 → 外键约束 → 500。
+    private const TABLES = ['product_shipping', 'listing_variants', 'listings', 'product_variants', 'designs', 'products'];
 
     public function purgeTrashed(Request $r)
     {
