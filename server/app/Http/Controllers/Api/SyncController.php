@@ -429,6 +429,8 @@ class SyncController extends Controller
             'pkg_width' => $v['pkg_width'] ?? null,
             'pkg_height' => $v['pkg_height'] ?? null,
             'pkg_weight' => $v['pkg_weight'] ?? null,
+            // ★ 2026-10-14：子体级属性覆盖（路径口径 JSON 文本）；数组也兼容
+            'attrs_json' => is_array($v['attrs_json'] ?? null) ? json_encode($v['attrs_json'], JSON_UNESCAPED_UNICODE) : ($v['attrs_json'] ?? null),
             'pricing_json' => $v['pricing_json'] ?? null,
             'shipping_json' => $v['shipping_json'] ?? null,
             'status' => $this->safeEnum($v['status'] ?? null, ['draft', 'planned', 'candidate', 'ready', 'published', 'error', 'archived'], 'planned'),
@@ -584,6 +586,7 @@ class SyncController extends Controller
                 'shipping_fee' => $v->shipping_fee, 'currency' => $v->currency, 'quantity' => $v->quantity,
                 'pkg_length' => $v->pkg_length, 'pkg_width' => $v->pkg_width,
                 'pkg_height' => $v->pkg_height, 'pkg_weight' => $v->pkg_weight,
+                'attrs_json' => is_array($v->attrs_json) ? json_encode($v->attrs_json, JSON_UNESCAPED_UNICODE) : $v->attrs_json,
                 'pricing_json' => $v->pricing_json, 'shipping_json' => $v->shipping_json,
                 'status' => $v->status, 'source' => $v->source,
                 'generated_at' => $v->generated_at, 'edited_at' => $v->edited_at, 'notes' => $v->notes,
@@ -699,7 +702,7 @@ class SyncController extends Controller
 
     private const H_PRODUCTS = ['id','spu_code','cn_name','en_name','alias','factory','material','material_en','technology','release_time','is_custom','default_color_id','default_color_name','default_size_id','default_size_name','variant_id','variant_code','variants_count','colors','sizes','size_L_cm','size_W_cm','size_H_cm','package_L_cm','package_W_cm','package_H_cm','volume_cm3','weight_g','design_face_w','design_face_h','design_face_count','min_price','qty_from','qty_to','retail_price','gold_price','platinum_price','diamond_price','black_diamond_price','star_diamond_price','shipping_US','shipping_UK','shipping_CA','shipping_DE','shipping_MX','shipping_FR','shipping_ES','shipping_IT','shipping_channel_US','shipping_channel_UK','shipping_channel_CA','shipping_channel_DE','shipping_channel_MX','shipping_channel_FR','shipping_channel_ES','shipping_channel_IT','freight_template_US','freight_template_UK','freight_template_CA','freight_template_DE','freight_template_MX','freight_template_FR','freight_template_ES','freight_template_IT','shipping_updated_at','shipping_variant','price_US','price_UK','price_CA','price_DE','price_MX','price_FR','price_ES','price_IT','price_currency','rate_note','status','notes','created_at','updated_at'];
     private const H_LISTING_COPY = ['id','design_code','marketplace','product_type','sku','item_name','highlight','bullet_1','bullet_2','bullet_3','bullet_4','bullet_5','product_description','generic_keyword','material','fabric_type','color','size','capacity','capacity_unit','model_number','model_name','handling_time','country_of_origin','price','currency','template','amazon_template','status','source','generated_at','edited_at','updated_by','review_notes','notes','shipping_fee','product_price','attrs_json','row_id'];
-    private const H_VARIANTS = ['row_id','parent_row_id','id','marketplace','sku','parent_sku','variation_theme','variant_value','variant_code','variant_color','variant_size','design_code','main_image','other_images','price','product_price','shipping_fee','quantity','pkg_length','pkg_width','pkg_height','pkg_weight','status','source','generated_at','edited_at','notes'];
+    private const H_VARIANTS = ['row_id','parent_row_id','id','marketplace','sku','parent_sku','variation_theme','variant_value','variant_code','variant_color','variant_size','design_code','main_image','other_images','price','product_price','shipping_fee','quantity','pkg_length','pkg_width','pkg_height','pkg_weight','attrs_json','status','source','generated_at','edited_at','notes'];
     private const H_DESIGNS = ['design_code','product_id','design_key','version','parent_code','source','adjust','cn_name','en_name','design_zh_name','design_zh_tags','design_en_name','design_en_tags','design_pattern','design_template','gallery_codes','effect_image_count','main_image','other_images','status','notes','created_at','updated_at'];
     private const H_PRODUCT_VARIANTS = ['product_code','external_variant_id','color','size','spec_json','weight_g','size_l_cm','size_w_cm','size_h_cm','pkg_l_cm','pkg_w_cm','pkg_h_cm','volume_cm3','status','updated_at'];
     /**
@@ -850,6 +853,7 @@ class SyncController extends Controller
                         'quantity' => $l->quantity,
                         'pkg_length' => $pkg[0], 'pkg_width' => $pkg[1],
                         'pkg_height' => $pkg[2], 'pkg_weight' => $pkg[3],
+                        'attrs_json' => is_array($l->attrs_json) ? json_encode($l->attrs_json, JSON_UNESCAPED_UNICODE) : $l->attrs_json,
                         'status' => $l->status,
                         'source' => $l->source, 'generated_at' => $l->generated_at,
                         'edited_at' => $l->edited_at ?: $l->updated_at, 'notes' => $l->notes,
