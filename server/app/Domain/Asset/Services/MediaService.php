@@ -46,6 +46,53 @@ class MediaService
         };
     }
 
+    /** ★ 2026-10-16：已知的媒体 mime（image/* 与 video/* 的白名单） */
+    public function isMediaMime(?string $mime): bool
+    {
+        return in_array(strtolower(trim(explode(';', (string) $mime)[0])), [
+            'image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/gif',
+            'video/mp4', 'video/quicktime', 'video/webm',
+        ], true);
+    }
+
+    /** ★ 2026-10-16：按【文件头】嗅探真实类型（客户端不带/带错 mime 时的兜底） */
+    public function sniffMime(string $bytes): ?string
+    {
+        if (strlen($bytes) < 12) {
+            return null;
+        }
+        $b = $bytes;
+        if (ord($b[0]) === 0xFF && ord($b[1]) === 0xD8) {
+            return 'image/jpeg';
+        }
+        if (substr($b, 0, 8) === "\x89PNG\r\n\x1a\n") {
+            return 'image/png';
+        }
+        if (substr($b, 0, 3) === 'GIF') {
+            return 'image/gif';
+        }
+        if (substr($b, 0, 4) === 'RIFF' && substr($b, 8, 4) === 'WEBP') {
+            return 'image/webp';
+        }
+        if (substr($b, 4, 4) === 'ftyp' && strpos(substr($b, 8, 16), 'mp4') !== false) {
+            return 'video/mp4';
+        }
+
+        return null;
+    }
+
+    /** ★ 2026-10-16：归一 mime —— 客户端给的不是已知媒体类型时，按文件头纠正 */
+    public function resolveMime(string $mime, string $bytes): string
+    {
+        $m = strtolower(trim(explode(';', $mime)[0]));
+        if ($this->isMediaMime($m)) {
+            return $m === 'image/jpg' ? 'image/jpeg' : $m;
+        }
+        $sniffed = $this->sniffMime($bytes);
+
+        return $sniffed ?: ($m !== '' ? $m : 'application/octet-stream');
+    }
+
     /** 公网稳定 URL（读时渲染；换域名只改配置） */
     public function publicUrl(string $key): string
     {
@@ -81,9 +128,24 @@ class MediaService
         if ($bytes === '') {
             throw new RuntimeException('空内容');
         }
+        // ★ 2026-10-16：先按文件头纠正 mime，避免 octet-stream → .bin（图片变“下载”而不是图片）
+        $mime = $this->resolveMime($mime, $bytes);
         $sha = $this->sha256($bytes);
         $existing = $this->findBlob($sha);
         if ($existing) {
+            // ★ 内容已在库里，但旧 blob 的类型是“未知”（.bin）而这次拿到的是真图片类型 → 升级重建
+            if (! $this->isMediaMime($existing->mime) && $this->isMediaMime($mime)) {
+                $upKey = $this->keyFor($sha, $this->extFor($mime));
+                Storage::disk($this->disk())->put($upKey, $bytes);
+                $existing->update([
+                    'storage_key' => $upKey,
+                    'mime' => $mime,
+                    'public_url' => $this->publicUrl($upKey),
+                ]);
+
+                return ['blob' => $existing->fresh(), 'deduped' => false];
+            }
+
             return ['blob' => $existing, 'deduped' => true];
         }
 

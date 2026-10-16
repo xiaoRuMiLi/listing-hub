@@ -2,6 +2,8 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Domain\Asset\Models\Blob;
+use App\Domain\Asset\Services\MediaService;
 use App\Domain\Catalog\Models\Product;
 use App\Domain\Catalog\Models\ProductShipping;
 use App\Domain\Catalog\Models\ProductVariant;
@@ -10,6 +12,7 @@ use App\Domain\Listing\Models\Listing;
 use App\Domain\Listing\Models\ListingVariant;
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Storage;
 
 /**
  * 维护接口（R16 · 2026-09-30）
@@ -57,6 +60,110 @@ class MaintenanceController extends Controller
         }
 
         return ['ok' => true, 'data' => ['mode' => $mode, 'purged' => $purged]];
+    }
+
+    /**
+     * ★ 2026-10-16：修复历史「图片类型丢失」的 blob（mime = application/octet-stream / key 以 .bin 结尾）
+     *
+     * POST /api/v1/maintenance/fix-image-mimes?limit=50&dry_run=0
+     *
+     * 做法：按【文件头】嗅探真实类型 → 同 sha、换正确后缀重建 OSS 对象 → 更新 blob 行 (storage_key/mime/public_url)
+     *      → 并把 designs / listings / listing_variants 里引用旧 URL 的列就地改写为新 URL。
+     * 幂等：修好后再跑，扫到的都是“已知类型” → 直接跳过。
+     */
+    public function fixImageMimes(Request $r)
+    {
+        $u = $r->user();
+        if (! ($u && method_exists($u, 'isAdmin') && $u->isAdmin())) {
+            return response()->json(['ok' => false, 'error' => ['code' => 'forbidden', 'message' => '仅管理员可执行']], 403);
+        }
+
+        $dry = (bool) (int) $r->input('dry_run', 0);
+        $limit = max(1, min(500, (int) $r->input('limit', 50)));
+        $media = app(MediaService::class);
+        $disk = Storage::disk($media->disk());
+
+        $known = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp', 'video/mp4', 'video/quicktime', 'video/webm'];
+        $blobs = Blob::where(function ($q) use ($known) {
+            $q->whereNotIn('mime', $known)->orWhere('storage_key', 'like', '%.bin');
+        })->orderBy('id')->limit($limit)->get();
+
+        $fixed = [];
+        $skipped = [];
+        $refs = ['designs' => 0, 'listings' => 0, 'listing_variants' => 0];
+
+        foreach ($blobs as $b) {
+            $bytes = null;
+            try {
+                $bytes = (string) $disk->get($b->storage_key);
+            } catch (\Throwable $e) {
+                $bytes = null;
+            }
+            $mime = ($bytes !== null && $bytes !== '') ? $media->sniffMime($bytes) : null;
+            if (! $mime) {
+                $skipped[] = ['blob' => $b->id, 'why' => $bytes === null ? 'read_failed' : 'not_an_image'];
+                continue;
+            }
+            $newKey = $media->keyFor($b->sha256, $media->extFor($mime));
+            if ($newKey === $b->storage_key && $media->isMediaMime($b->mime)) {
+                $skipped[] = ['blob' => $b->id, 'why' => 'already_ok'];
+                continue;
+            }
+
+            $old = (string) $b->public_url;
+            $new = $media->publicUrl($newKey);
+
+            if (! $dry) {
+                $disk->put($newKey, $bytes);
+                $b->update(['storage_key' => $newKey, 'mime' => $mime, 'public_url' => $new]);
+                if ($old !== '' && $old !== $new) {
+                    $refs['designs'] += $this->rewriteRef(Design::class, ['main_image', 'other_images'], $old, $new);
+                    $refs['listings'] += $this->rewriteRef(Listing::class, ['main_image', 'other_images', 'attrs_json', 'copy_json', 'variant_json'], $old, $new);
+                    $refs['listing_variants'] += $this->rewriteRef(ListingVariant::class, ['main_image', 'other_images'], $old, $new);
+                }
+            }
+            $fixed[] = ['blob' => $b->id, 'mime' => $mime, 'from' => $old, 'to' => $new];
+        }
+
+        return ['ok' => true, 'data' => [
+            'dry_run' => $dry,
+            'scanned' => $blobs->count(),
+            'fixed' => count($fixed),
+            'refs' => $refs,
+            'skipped' => array_slice($skipped, 0, 20),
+            'skipped_count' => count($skipped),
+            'items' => array_slice($fixed, 0, 20),
+        ]];
+    }
+
+    /** 把某模型某几列里的 old URL 就地替换为 new（返回受影响行数；支持 cast 成数组的 JSON 列） */
+    private function rewriteRef(string $model, array $cols, string $old, string $new): int
+    {
+        $n = 0;
+        foreach ($cols as $col) {
+            foreach ($model::where($col, 'like', '%' . $old . '%')->get() as $row) {
+                $v = $row->{$col};
+                if (is_array($v)) {   // JSON 桶（被 cast 成数组的列）
+                    $json = json_encode($v, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+                    if ($json === false || strpos($json, $old) === false) {
+                        continue;
+                    }
+                    $row->{$col} = json_decode(str_replace($old, $new, $json), true);
+                    $row->save();
+                    $n++;
+                    continue;
+                }
+                $v = (string) $v;
+                if ($v === '' || strpos($v, $old) === false) {
+                    continue;
+                }
+                $row->{$col} = str_replace($old, $new, $v);
+                $row->save();
+                $n++;
+            }
+        }
+
+        return $n;
     }
 
     private function purgeTable(string $tbl, string $mode): int

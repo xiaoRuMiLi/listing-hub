@@ -65,6 +65,8 @@ Route::prefix('v1')->group(function () {
 
         // ★ 维护（R16）：物理清理软删行（幽灵行）——仅管理员
         Route::match(['post', 'delete'], 'maintenance/trashed', [MaintenanceController::class, 'purgeTrashed']);
+    // ★ 2026-10-16：修复历史图片 mime/扩展名（.bin → .jpg/.png）并改写引用
+    Route::match(['get', 'post'], 'maintenance/fix-image-mimes', [MaintenanceController::class, 'fixImageMimes']);
 
         // 资产域（OSS 图床）
         Route::post('assets/check', [AssetController::class, 'check']);
