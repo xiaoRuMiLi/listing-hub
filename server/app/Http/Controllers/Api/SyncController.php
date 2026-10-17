@@ -131,6 +131,11 @@ class SyncController extends Controller
                     // ★ R9：图 URL 归一（已是 OSS 则不动；否则计数回执，sync_images/normalize_images 时立即镜像）
                     'main_image' => $this->ossUrl((string) ($d['main_image'] ?? ''), $doMirror, $pendingBlobs),
                     'other_images' => $this->ossUrls((string) ($d['other_images'] ?? ''), $doMirror, $pendingBlobs),
+                    // ★ R20（2026-10-17）：图片双向同步 —— 人工 override 整组快照 + 上游影子列
+                    //   override 非空时本地不再被上游覆盖；这里一并归一为 OSS。
+                    'images_override' => $this->ossUrls((string) ($d['images_override'] ?? ''), $doMirror, $pendingBlobs),
+                    'images_override_at' => ($d['images_override_at'] ?? null) ?: null,
+                    'images_upstream' => $this->ossUrls((string) ($d['images_upstream'] ?? ''), $doMirror, $pendingBlobs),
                     'pushed_by' => $this->pushedBy($r, $payload),
                     'status' => $this->safeEnum($d['status'] ?? null, ['draft', 'active', 'superseded', 'archived'], 'active'),
                 ];
@@ -329,6 +334,18 @@ class SyncController extends Controller
                         $conflicts[] = ['key' => ['marketplace' => $mp, 'sku' => $sku], 'your_revision' => (int) $l['revision'], 'server_revision' => (int) $existing->revision];
                         continue;
                     }
+                    // ★ R19（2026-10-17）：push 不得抹掉「发布态」。
+                    //   本地 listing_copy 没有 asin/published_at，status 也常停在 ready；
+                    //   直接 fill 会把已上架记录打回 ready、清空 asin（实测 12495 中招）。
+                    //   口径：发布类字段只由 /listings/publish-result 与 unpublish 改写，push 一律不降级。
+                    if (($row['asin'] ?? null) === null && ! empty($existing->asin)) {
+                        $row['asin'] = $existing->asin;
+                    }
+                    $incomingStatus = $row['status'] ?? null;
+                    if ((string) $existing->status === 'published' && (string) $incomingStatus !== 'published') {
+                        $row['status'] = 'published';
+                        $warnings[] = '[WARN] ' . $sku . ' 已上架，忽略推送的 status=' . (string) ($incomingStatus ?? 'null') . '（保持 published；如需下线请走 unpublish）';
+                    }
                     $existing->fill($row);
                     $existing->revision = (int) $existing->revision + 1;
                     $existing->save();
@@ -516,6 +533,8 @@ class SyncController extends Controller
                 'pattern' => $d->pattern, 'template' => $d->template,
                 'gallery_codes' => $d->gallery_codes, 'effect_count' => $d->effect_count,
                 'main_image' => $d->main_image, 'other_images' => $d->other_images,
+                'images_override' => $d->images_override, 'images_override_at' => $d->images_override_at,
+                'images_upstream' => $d->images_upstream,
                 'status' => $d->status, 'notes' => $d->notes,
                 'pushed_by' => $d->pushed_by,
                 'updated_at' => $d->updated_at,
@@ -703,7 +722,7 @@ class SyncController extends Controller
     private const H_PRODUCTS = ['id','spu_code','cn_name','en_name','alias','factory','material','material_en','technology','release_time','is_custom','default_color_id','default_color_name','default_size_id','default_size_name','variant_id','variant_code','variants_count','colors','sizes','size_L_cm','size_W_cm','size_H_cm','package_L_cm','package_W_cm','package_H_cm','volume_cm3','weight_g','design_face_w','design_face_h','design_face_count','min_price','qty_from','qty_to','retail_price','gold_price','platinum_price','diamond_price','black_diamond_price','star_diamond_price','shipping_US','shipping_UK','shipping_CA','shipping_DE','shipping_MX','shipping_FR','shipping_ES','shipping_IT','shipping_channel_US','shipping_channel_UK','shipping_channel_CA','shipping_channel_DE','shipping_channel_MX','shipping_channel_FR','shipping_channel_ES','shipping_channel_IT','freight_template_US','freight_template_UK','freight_template_CA','freight_template_DE','freight_template_MX','freight_template_FR','freight_template_ES','freight_template_IT','shipping_updated_at','shipping_variant','price_US','price_UK','price_CA','price_DE','price_MX','price_FR','price_ES','price_IT','price_currency','rate_note','status','notes','created_at','updated_at'];
     private const H_LISTING_COPY = ['id','design_code','marketplace','product_type','sku','item_name','highlight','bullet_1','bullet_2','bullet_3','bullet_4','bullet_5','product_description','generic_keyword','material','fabric_type','color','size','capacity','capacity_unit','model_number','model_name','handling_time','country_of_origin','price','currency','template','amazon_template','status','source','generated_at','edited_at','updated_by','review_notes','notes','shipping_fee','product_price','attrs_json','row_id'];
     private const H_VARIANTS = ['row_id','parent_row_id','id','marketplace','sku','parent_sku','variation_theme','variant_value','variant_code','variant_color','variant_size','design_code','main_image','other_images','price','product_price','shipping_fee','quantity','pkg_length','pkg_width','pkg_height','pkg_weight','attrs_json','status','source','generated_at','edited_at','notes'];
-    private const H_DESIGNS = ['design_code','product_id','design_key','version','parent_code','source','adjust','cn_name','en_name','design_zh_name','design_zh_tags','design_en_name','design_en_tags','design_pattern','design_template','gallery_codes','effect_image_count','main_image','other_images','status','notes','created_at','updated_at'];
+    private const H_DESIGNS = ['design_code','product_id','design_key','version','parent_code','source','adjust','cn_name','en_name','design_zh_name','design_zh_tags','design_en_name','design_en_tags','design_pattern','design_template','gallery_codes','effect_image_count','main_image','other_images','status','notes','created_at','updated_at','images_override','images_override_at','images_upstream'];
     private const H_PRODUCT_VARIANTS = ['product_code','external_variant_id','color','size','spec_json','weight_g','size_l_cm','size_w_cm','size_h_cm','pkg_l_cm','pkg_w_cm','pkg_h_cm','volume_cm3','status','updated_at'];
     /**
      * ★ R15（2026-09-30）：含软删查找——活行优先，否则取最近一条软删行；命中软删则先 restore。
@@ -880,6 +899,9 @@ class SyncController extends Controller
                     'main_image' => $d->main_image, 'other_images' => $d->other_images,
                     'status' => $d->status, 'notes' => $d->notes,
                     'created_at' => $d->created_at, 'updated_at' => $d->updated_at,
+                    // ★ R20（2026-10-17）：图片 override 双向同步
+                    'images_override' => $d->images_override, 'images_override_at' => $d->images_override_at,
+                    'images_upstream' => $d->images_upstream,
                 ])->all();
 
                 return $this->csvResponse('designs.csv', self::H_DESIGNS, $rows);
